@@ -22,7 +22,7 @@ async function makeGitRepo(): Promise<string> {
     const proc = Bun.spawn(args, { cwd: dir, stdout: "pipe", stderr: "pipe" });
     await proc.exited;
   };
-  await run("git", "init");
+  await run("git", "init", "-b", "main");
   await run("git", "config", "user.email", "test@test.com");
   await run("git", "config", "user.name", "Test");
   const proc = Bun.spawn(
