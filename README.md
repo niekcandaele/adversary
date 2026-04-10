@@ -38,9 +38,13 @@ adversary run --plan /path/to/PLAN.md --turns 6 --severity-threshold 7
 ## Usage
 
 ```
-adversary run --plan <path> [options]
+adversary <command> [options]
 
-Options:
+Commands:
+  hello                         Print "Hello, world!"
+  run --plan <path> [options]   Run the adversarial loop
+
+Options for 'run':
   --plan <path>                 Path to the plan file (required)
   --turns <n>                   Maximum number of turns (default: 5)
   --severity-threshold <n>      Severity threshold 1..10 (default: 7)

@@ -20,9 +20,10 @@ function printHelp(): void {
 adversary — adversarial implement→verify loop orchestrator
 
 Usage:
-  adversary run --plan <path> [options]
+  adversary <command> [options]
 
 Commands:
+  hello  Print a friendly greeting
   run    Run the adversarial loop
 
 Options for 'run':
@@ -142,6 +143,11 @@ async function main(): Promise<void> {
     process.stderr.write(`Run 'adversary --help' for usage.\n`);
   }
 
+  if (command === "hello") {
+    process.stdout.write("Hello, world!\n");
+    process.exit(0);
+  }
+
   if (command === "run") {
     if (!options["plan"] || options["plan"] === true) {
       process.stderr.write("Error: --plan is required\n");
@@ -177,11 +183,12 @@ async function main(): Promise<void> {
       process.stderr.write(`\nError: ${e instanceof Error ? e.message : String(e)}\n`);
       process.exit(1);
     }
-  } else {
-    process.stderr.write(`Unknown command: ${command}\n`);
-    printHelp();
-    process.exit(1);
+    return;
   }
+
+  process.stderr.write(`Unknown command: ${command}\n`);
+  printHelp();
+  process.exit(1);
 }
 
 // Only run when executed directly, not when imported by tests

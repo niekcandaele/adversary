@@ -2,11 +2,20 @@ import { test, expect, describe } from "bun:test";
 import { parseArgs } from "../src/cli/index.js";
 import { validateRunOptions } from "../src/cli/run.js";
 
+const CLI_ENTRYPOINT = new URL("../src/cli/index.ts", import.meta.url).pathname;
+
 describe("parseArgs", () => {
   test("parses run command with required --plan flag", () => {
     const { command, options, unknownFlags } = parseArgs(["node", "adversary", "run", "--plan", "plan.md"]);
     expect(command).toBe("run");
     expect(options["plan"]).toBe("plan.md");
+    expect(unknownFlags).toHaveLength(0);
+  });
+
+  test("parses hello command", () => {
+    const { command, options, unknownFlags } = parseArgs(["node", "adversary", "hello"]);
+    expect(command).toBe("hello");
+    expect(Object.keys(options)).toHaveLength(0);
     expect(unknownFlags).toHaveLength(0);
   });
 
@@ -79,6 +88,25 @@ describe("parseArgs", () => {
     // When --plan is the last arg, there's no next value, so it becomes boolean true.
     const { options } = parseArgs(["node", "adversary", "run", "--plan"]);
     expect(options["plan"]).toBe(true);
+  });
+});
+
+describe("hello command", () => {
+  test("prints hello world to stdout", async () => {
+    const proc = Bun.spawn([process.execPath, "run", CLI_ENTRYPOINT, "hello"], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toBe("Hello, world!\n");
+    expect(stderr).toBe("");
   });
 });
 
