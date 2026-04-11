@@ -30,8 +30,10 @@ async function makeGitRepo(): Promise<string> {
   await run("git", "init", "-b", "main");
   await run("git", "config", "user.email", "test@test.com");
   await run("git", "config", "user.name", "Test");
+  // Add .gitignore for .pi-adversary/ so run artifacts don't appear as untracked changes.
+  // This matches real-world usage (the preflight check warns if this is missing).
   const proc = Bun.spawn(
-    ["sh", "-c", "echo 'init' > README.md && git add -A && git commit -m init"],
+    ["sh", "-c", "echo '.pi-adversary/' > .gitignore && echo 'init' > README.md && git add -A && git commit -m init"],
     { cwd: dir, stdout: "pipe", stderr: "pipe" }
   );
   await proc.exited;

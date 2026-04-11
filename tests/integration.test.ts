@@ -26,7 +26,7 @@ async function makeGitRepo(): Promise<string> {
   await run("git", "config", "user.email", "test@test.com");
   await run("git", "config", "user.name", "Test");
   const proc = Bun.spawn(
-    ["sh", "-c", "echo 'init' > README.md && git add -A && git commit -m init"],
+    ["sh", "-c", "echo '.pi-adversary/' > .gitignore && echo 'init' > README.md && git add -A && git commit -m init"],
     { cwd: dir, stdout: "pipe", stderr: "pipe" }
   );
   await proc.exited;
