@@ -1,6 +1,6 @@
 {
   "name": "adversarial",
-  "version": "0.1.0",
+  "version": "0.0.0",
   "module": "index.ts",
   "type": "module",
   "private": true,
@@ -9,13 +9,15 @@
   },
   "scripts": {
     "start": "bun run src/cli/index.ts",
-    "test": "bun test",
-    "typecheck": "tsc --noEmit",
-    "build": "bun build src/cli/index.ts --compile --outfile dist/adversary",
-    "build:linux-x64": "bun build src/cli/index.ts --compile --target=bun-linux-x64 --outfile dist/adversary-linux-x64",
-    "build:linux-arm64": "bun build src/cli/index.ts --compile --target=bun-linux-arm64 --outfile dist/adversary-linux-arm64",
-    "build:darwin-arm64": "bun build src/cli/index.ts --compile --target=bun-darwin-arm64 --outfile dist/adversary-darwin-arm64",
-    "build:all": "bun run build:linux-x64 && bun run build:linux-arm64 && bun run build:darwin-arm64"
+    "test": "bun run build:version && bun test",
+    "typecheck": "bun run build:version && tsc --noEmit",
+    "build:version": "mkdir -p src/generated && echo \"export const VERSION = \\\"$(git describe --tags --always 2>/dev/null || echo dev)\\\";\" > src/generated/version.ts",
+    "build": "bun run build:version && bun build src/cli/index.ts --compile --outfile dist/adversary",
+    "build:linux-x64": "bun run build:version && bun build src/cli/index.ts --compile --target=bun-linux-x64 --outfile dist/adversary-linux-x64",
+    "build:linux-arm64": "bun run build:version && bun build src/cli/index.ts --compile --target=bun-linux-arm64 --outfile dist/adversary-linux-arm64",
+    "build:darwin-arm64": "bun run build:version && bun build src/cli/index.ts --compile --target=bun-darwin-arm64 --outfile dist/adversary-darwin-arm64",
+    "build:all": "bun run build:linux-x64 && bun run build:linux-arm64 && bun run build:darwin-arm64",
+    "postinstall": "bun run build:version"
   },
   "devDependencies": {
     "@types/bun": "latest"

@@ -1,7 +1,6 @@
 import { runCommand } from "./run.js";
 import type { RunOptions } from "../types/index.js";
-
-const VERSION = "0.1.0";
+import { VERSION } from "../generated/version.js";
 
 const KNOWN_FLAGS = new Set([
   "plan",
