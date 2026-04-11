@@ -22,10 +22,10 @@ Generate a concise, meaningful git commit message for the changes made on this b
 - Turn number: ${turn}
 
 ## Instructions
-1. Explore what changed in the most recent commit on the current branch:
-   - Run \`git log --oneline -5\` to see recent commits
-   - Run \`git diff HEAD~1 HEAD --stat\` to see what files changed
-   - Run \`git diff HEAD~1 HEAD\` to see the actual diff (summarize, don't read all of it if large)
+1. Explore the pending working-tree changes (these are about to be committed):
+   - Run \`git status --short\` to see which files have pending changes
+   - Run \`git diff HEAD --stat\` to see what files changed
+   - Run \`git diff HEAD\` to see the actual diff (summarize, don't read all of it if large)
 2. Write a commit message:
    - Subject line: max 72 characters, imperative mood (e.g. "Add", "Fix", "Refactor")
    - Optional body: explain why, not what (wrap at 72 chars)

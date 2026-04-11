@@ -88,9 +88,12 @@ export async function generateCommitMessage(options: {
   const promptPath = join(turnDir, "commit-msg-prompt.md");
   await generateCommitMessagePrompt({ branch, planTitle, turn, outputPath: promptPath });
 
-  const vars = {
+  const vars: Record<string, string> = {
     promptFile: promptPath,
     branch,
+    baseBranch: "",
+    cwd,
+    turn: String(turn),
   };
 
   const command = interpolate(config.summarizerCommandTemplate, vars);
@@ -136,10 +139,11 @@ export async function generatePrSummary(options: {
   const promptPath = join(runDir, "pr-summary-prompt.md");
   await generatePrBodyPrompt({ branch, baseBranch, planTitle, planContent, outputPath: promptPath });
 
-  const vars = {
+  const vars: Record<string, string> = {
     promptFile: promptPath,
     branch,
     baseBranch,
+    cwd,
   };
 
   const command = interpolate(config.summarizerCommandTemplate, vars);
