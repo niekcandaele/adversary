@@ -3,6 +3,98 @@ import { formatDuration } from "../utils/slugify.js";
 import { writeText } from "../utils/fs.js";
 import { join } from "node:path";
 
+export async function generateCommitMessagePrompt(options: {
+  branch: string;
+  planTitle: string;
+  turn: number;
+  outputPath: string;
+}): Promise<string> {
+  const { branch, planTitle, turn, outputPath } = options;
+
+  const content = `# Commit Message Generator
+
+## Task
+Generate a concise, meaningful git commit message for the changes made on this branch.
+
+## Context
+- Branch: \`${branch}\`
+- Plan title: ${planTitle}
+- Turn number: ${turn}
+
+## Instructions
+1. Explore the pending working-tree changes (these are about to be committed):
+   - Run \`git status --short\` to see which files have pending changes
+   - Run \`git diff HEAD --stat\` to see what files changed
+   - Run \`git diff HEAD\` to see the actual diff (summarize, don't read all of it if large)
+2. Write a commit message:
+   - Subject line: max 72 characters, imperative mood (e.g. "Add", "Fix", "Refactor")
+   - Optional body: explain why, not what (wrap at 72 chars)
+   - Do NOT include metadata like "adversary: turn N" — write a genuine description of the work
+3. Return ONLY a JSON object (no other text):
+   \`\`\`json
+   { "commitMessage": "Subject line\\n\\nOptional body paragraph." }
+   \`\`\`
+
+Return only the JSON object.
+`;
+
+  await writeText(outputPath, content);
+  return content;
+}
+
+export async function generatePrBodyPrompt(options: {
+  branch: string;
+  baseBranch: string;
+  planTitle: string;
+  planContent: string;
+  outputPath: string;
+}): Promise<string> {
+  const { branch, baseBranch, planTitle, planContent, outputPath } = options;
+
+  const content = `# PR Description Generator
+
+## Task
+Generate a rich, reviewer-friendly pull request title and description for the changes on this branch.
+
+## Context
+- Branch: \`${branch}\`
+- Base branch: \`${baseBranch}\`
+- Plan title: ${planTitle}
+
+## Instructions
+1. Explore all changes on this branch vs the base branch:
+   - Run \`git log ${baseBranch}..HEAD --oneline\` to see all commits
+   - Run \`git diff ${baseBranch}...HEAD --stat\` to see what files changed
+   - Run \`git diff ${baseBranch}...HEAD\` to understand the actual changes (sample if large)
+2. Read the plan content below for context on "why" this work was done
+3. Generate the PR description with these sections:
+   - **title**: A short, freeform PR title (NOT "adversary: ...") — describes what was done
+   - **summary**: 2-5 bullet points covering what changed and why
+   - **reviewerGuide**: Where to start reviewing, what patterns to look for, gotchas
+   - **testPlan**: What tests exist, how to run them, what to manually verify
+   - **issueNumber**: Any GitHub/GitLab issue number referenced in the plan (null if none)
+4. Return ONLY a JSON object (no other text):
+   \`\`\`json
+   {
+     "title": "Brief, descriptive PR title",
+     "summary": "- Bullet 1\\n- Bullet 2\\n- Bullet 3",
+     "reviewerGuide": "Start by reading X, then look at Y...",
+     "testPlan": "Run \`bun test\`. New tests in tests/foo.test.ts cover...",
+     "issueNumber": 42
+   }
+   \`\`\`
+
+## Plan Content
+
+${planContent}
+
+Return only the JSON object.
+`;
+
+  await writeText(outputPath, content);
+  return content;
+}
+
 export async function generateFirstTurnPrompt(options: {
   planContent: string;
   threshold: number;

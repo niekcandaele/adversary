@@ -3,22 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 
-import { buildPrTitle, extractUrl, createPr, PrError } from "../src/pr/index.js";
+import { extractUrl, createPr, PrError } from "../src/pr/index.js";
 import type { RunState } from "../src/types/index.js";
-
-describe("buildPrTitle", () => {
-  test("prefixes with 'adversary:'", () => {
-    expect(buildPrTitle("My feature plan")).toBe("adversary: My feature plan");
-  });
-
-  test("preserves existing case", () => {
-    expect(buildPrTitle("Add JSON output support")).toBe("adversary: Add JSON output support");
-  });
-
-  test("handles short title", () => {
-    expect(buildPrTitle("fix")).toBe("adversary: fix");
-  });
-});
 
 describe("extractUrl", () => {
   test("extracts https URL from typical gh output", () => {
@@ -83,6 +69,7 @@ describe("createPr — gh path", () => {
       platform: "github",
       prCli: fakeGhPath,
       prBody: "Test PR body",
+      prTitle: "Add smart commit messages and rich PR descriptions",
       cwd: dir,
       timeoutMs: 10000,
     });
@@ -94,7 +81,7 @@ describe("createPr — gh path", () => {
     expect(args).toContain("create");
     expect(args).toContain("--draft");
     expect(args).toContain("--title");
-    expect(args).toContain("adversary: My Feature Plan");
+    expect(args).toContain("Add smart commit messages and rich PR descriptions");
     expect(args).toContain("--head");
     expect(args).toContain(state.branch);
     expect(args).toContain("--base");
@@ -116,6 +103,7 @@ describe("createPr — gh path", () => {
         platform: "github",
         prCli: fakeGhPath,
         prBody: "Test PR body",
+        prTitle: "Test PR Title",
         cwd: dir,
         timeoutMs: 10000,
       })
@@ -139,6 +127,7 @@ describe("createPr — glab path", () => {
       platform: "gitlab",
       prCli: fakeGlabPath,
       prBody: "Test MR body",
+      prTitle: "LLM-generated MR title",
       cwd: dir,
       timeoutMs: 10000,
     });
@@ -150,7 +139,7 @@ describe("createPr — glab path", () => {
     expect(args).toContain("create");
     expect(args).toContain("--draft");
     expect(args).toContain("--title");
-    expect(args).toContain("adversary: My Feature Plan");
+    expect(args).toContain("LLM-generated MR title");
     expect(args).toContain("--source-branch");
     expect(args).toContain(state.branch);
     expect(args).toContain("--target-branch");
@@ -172,6 +161,7 @@ describe("createPr — glab path", () => {
         platform: "gitlab",
         prCli: fakeGlabPath,
         prBody: "Test MR body",
+        prTitle: "Test MR Title",
         cwd: dir,
         timeoutMs: 10000,
       })
@@ -197,6 +187,7 @@ describe("createPr — timeout", () => {
         platform: "github",
         prCli: fakeGhPath,
         prBody: "body",
+        prTitle: "Test Title",
         cwd: dir,
         timeoutMs: 200, // 200ms — will definitely time out
       })

@@ -71,13 +71,41 @@ Create `.pi-adversary.json` in the repo root:
   "baseBranch": "main",
   "implementCommandTemplate": "pi -p @{promptFile}",
   "verifyCommandTemplate": "pi -p \"/skill:verify --mode=report-only --format=json --output={verifyOutputFile}\"",
+  "summarizerCommandTemplate": "pi -p @{promptFile}",
   "implementTimeoutMs": 2700000,
   "verifyTimeoutMs": 5400000,
-  "prTimeoutMs": 300000
+  "prTimeoutMs": 300000,
+  "summarizerTimeoutMs": 300000
 }
 ```
 
 All fields are optional — unset fields use the defaults above.
+
+### `summarizerCommandTemplate`
+
+The summarizer is an LLM agent called after each turn to generate a meaningful commit message, and once at the end to generate a rich PR description.
+
+The agent is given a prompt file (via `{promptFile}`) and must output a JSON object — everything outside the JSON is ignored so preamble text is fine.
+
+**Commit message prompt**: the agent receives the branch name, plan title, turn number, and instructions to inspect `git diff HEAD~1 HEAD`. It must return:
+
+```json
+{ "commitMessage": "Add meaningful description of what changed" }
+```
+
+**PR body prompt**: the agent receives the branch, base branch, plan title, plan content, and instructions to inspect the full branch diff. It must return:
+
+```json
+{
+  "title": "Freeform PR title",
+  "summary": "- Bullet point summary",
+  "reviewerGuide": "Where to start reviewing...",
+  "testPlan": "How to test the changes...",
+  "issueNumber": 42
+}
+```
+
+`issueNumber` should be `null` if no issue is referenced.
 
 ### Template Variables
 
@@ -87,7 +115,7 @@ Commands are templates with these substitution variables:
 |----------|-------------|
 | `{cwd}` | Working directory |
 | `{planFile}` | Snapshotted plan file path |
-| `{promptFile}` | Implement prompt file path |
+| `{promptFile}` | Prompt file path (implement prompt for implementer, summarizer prompt for summarizer) |
 | `{findingsFile}` | Current findings markdown path |
 | `{historyFile}` | Run history markdown path |
 | `{verifyOutputFile}` | Expected verify JSON output path |
@@ -95,6 +123,7 @@ Commands are templates with these substitution variables:
 | `{turn}` | Current turn number |
 | `{maxTurns}` | Maximum turns |
 | `{branch}` | Feature branch name |
+| `{baseBranch}` | Base branch name |
 
 ## Verify JSON Contract
 
@@ -152,11 +181,17 @@ Structure:
       final-summary.md
       final-summary.json
       pr-body.md
+      pr-summary-prompt.md
+      pr-summarizer.stdout.log
+      pr-summarizer.stderr.log
       turn-1/
         implement-input.md
         implement-command.txt
         implement.stdout.log
         implement.stderr.log
+        commit-msg-prompt.md
+        commit-msg-summarizer.stdout.log
+        commit-msg-summarizer.stderr.log
         verify-command.txt
         verify.stdout.log
         verify.stderr.log
@@ -175,6 +210,7 @@ Structure:
 | Implement step | 45 minutes | `implementTimeoutMs` |
 | Verify step | 90 minutes | `verifyTimeoutMs` |
 | PR creation | 5 minutes | `prTimeoutMs` |
+| Summarizer step | 5 minutes | `summarizerTimeoutMs` |
 
 ## Exit Codes
 

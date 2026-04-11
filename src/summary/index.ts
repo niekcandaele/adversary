@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import type { RunState, VerifyFinding, RunOutcome } from "../types/index.js";
+import type { RunState, VerifyFinding, RunOutcome, PrSummaryOutput } from "../types/index.js";
 import { writeText, writeJsonFile } from "../utils/fs.js";
 import { formatDuration } from "../utils/slugify.js";
 
@@ -20,6 +20,7 @@ function outcomeLabel(outcome: RunOutcome | undefined): string {
     case "clean": return "✓ Clean — zero threshold findings";
     case "capped": return "⚠ Capped — max turns reached with findings remaining";
     case "implement-failure": return "✗ Stopped — implementer step failed";
+    case "summarizer-failure": return "✗ Stopped — summarizer step failed";
     case "verify-failure": return "✗ Stopped — verifier step failed";
     case "verify-blocked": return "✗ Stopped — verifier returned blocked status";
     case "verify-error": return "✗ Stopped — verifier returned error status";
@@ -111,7 +112,10 @@ Run artifacts are stored at: \`${state.runDir}\`
   await writeJsonFile(join(state.runDir, "final-summary.json"), json);
 }
 
-export async function generatePrBody(state: RunState, threshold: number): Promise<string> {
+/**
+ * Assemble a rich PR body by stitching LLM-generated sections with deterministic metadata.
+ */
+export function assemblePrBody(state: RunState, threshold: number, llm: PrSummaryOutput): string {
   const allThreshold: VerifyFinding[] = [];
   const allBelow: VerifyFinding[] = [];
   const lastTurn = state.turns.length > 0 ? state.turns[state.turns.length - 1] : undefined;
@@ -119,6 +123,8 @@ export async function generatePrBody(state: RunState, threshold: number): Promis
     allThreshold.push(...lastTurn.thresholdFindings);
     allBelow.push(...lastTurn.belowThresholdFindings);
   }
+
+  const issueLink = llm.issueNumber != null ? `\nCloses #${llm.issueNumber}\n` : "";
 
   const thresholdSection =
     allThreshold.length === 0
@@ -134,37 +140,43 @@ export async function generatePrBody(state: RunState, threshold: number): Promis
           .map((f) => `- **${f.title}** (severity ${f.severity}): ${f.description}`)
           .join("\n");
 
-  const body = `> ⚠️ This PR was created automatically by the adversary orchestrator. Do not merge without human review.
+  return `> ⚠️ This PR was created automatically by the adversary orchestrator. Do not merge without human review.
 
-## Plan
+## Summary
+${issueLink}
+${llm.summary}
 
-**${state.planTitle}**
-Plan file: \`${state.planFile}\`
+## Reviewer Guide
 
-## Run Summary
+${llm.reviewerGuide}
+
+## Test Plan
+
+${llm.testPlan}
+
+<details>
+<summary>Orchestration metadata</summary>
 
 | Field | Value |
 |-------|-------|
+| Plan | \`${state.planFile}\` |
 | Branch | \`${state.branch}\` |
 | Base | \`${state.baseBranch}\` |
 | Turns | ${state.turns.length} |
 | Threshold | ${threshold} |
 | Outcome | ${outcomeLabel(state.outcome)} |
 
-## Threshold Findings (severity >= ${threshold})
+### Threshold Findings (severity >= ${threshold})
 
 ${thresholdSection}
 
-## Below-Threshold Findings (severity < ${threshold})
+### Below-Threshold Findings (severity < ${threshold})
 
 ${belowSection}
 
-## Artifacts
+Artifacts: \`${state.runDir}\`
 
-\`${state.runDir}\`
+</details>
 `;
-
-  const prBodyPath = join(state.runDir, "pr-body.md");
-  await writeText(prBodyPath, body);
-  return body;
 }
+

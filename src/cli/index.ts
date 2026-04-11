@@ -41,9 +41,11 @@ Config file (.pi-adversary.json):
     "baseBranch": "main",
     "implementCommandTemplate": "pi -p @{promptFile}",
     "verifyCommandTemplate": "pi -p \\"/skill:verify --mode=report-only --format=json --output={verifyOutputFile}\\"",
-    "implementTimeoutMs": 2700000,   // 45 minutes
-    "verifyTimeoutMs": 5400000,      // 90 minutes
-    "prTimeoutMs": 300000            // 5 minutes
+    "summarizerCommandTemplate": "pi -p @{promptFile}",
+    "implementTimeoutMs": 2700000,
+    "verifyTimeoutMs": 5400000,
+    "prTimeoutMs": 300000,
+    "summarizerTimeoutMs": 300000
   }
 
 Template variables:
@@ -57,11 +59,13 @@ Template variables:
   {turn}             Current turn number
   {maxTurns}         Maximum turns
   {branch}           Feature branch name
+  {baseBranch}       Base branch name
 
 Timeouts (defaults):
-  implementTimeoutMs: 2700000 (45 minutes)
-  verifyTimeoutMs:    5400000 (90 minutes)
-  prTimeoutMs:        300000  (5 minutes)
+  implementTimeoutMs:  2700000 (45 minutes)
+  verifyTimeoutMs:     5400000 (90 minutes)
+  prTimeoutMs:         300000  (5 minutes)
+  summarizerTimeoutMs: 300000  (5 minutes)
 
 Examples:
   adversary run --plan /path/to/plan.md --turns 6 --severity-threshold 7

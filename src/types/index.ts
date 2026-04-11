@@ -28,19 +28,37 @@ export interface AdversaryConfig {
   baseBranch?: string;
   implementCommandTemplate: string;
   verifyCommandTemplate: string;
+  summarizerCommandTemplate: string;
   implementTimeoutMs: number;
   verifyTimeoutMs: number;
   prTimeoutMs: number;
+  summarizerTimeoutMs: number;
 }
 
 export const DEFAULT_CONFIG: AdversaryConfig = {
   implementCommandTemplate: "pi -p @{promptFile}",
   verifyCommandTemplate:
     'pi -p "/skill:verify --mode=report-only --format=json --output={verifyOutputFile}"',
+  summarizerCommandTemplate: "pi -p @{promptFile}",
   implementTimeoutMs: 2700000,
   verifyTimeoutMs: 5400000,
   prTimeoutMs: 300000,
+  summarizerTimeoutMs: 300000,
 };
+
+// ── Summarizer output types ───────────────────────────────────────────────────
+
+export interface SummarizerOutput {
+  commitMessage: string;
+}
+
+export interface PrSummaryOutput {
+  title: string;
+  summary: string;
+  reviewerGuide: string;
+  testPlan: string;
+  issueNumber: number | null;
+}
 
 // ── CLI options ──────────────────────────────────────────────────────────────
 
@@ -68,6 +86,7 @@ export type RunOutcome =
   | "clean"
   | "capped"
   | "implement-failure"
+  | "summarizer-failure"
   | "verify-failure"
   | "verify-blocked"
   | "verify-error"
@@ -81,10 +100,11 @@ export interface TurnResult {
   verifyDurationMs: number;
   repoChanged: boolean;
   commitSha?: string;
+  commitMessage?: string;
   verifyStatus: VerifyStatus;
   thresholdFindings: VerifyFinding[];
   belowThresholdFindings: VerifyFinding[];
-  outcome: "continue" | "clean" | "capped" | "implement-failure" | "verify-failure" | "verify-blocked" | "verify-error";
+  outcome: "continue" | "clean" | "capped" | "implement-failure" | "summarizer-failure" | "verify-failure" | "verify-blocked" | "verify-error";
 }
 
 export interface RunState {

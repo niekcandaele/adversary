@@ -26,7 +26,7 @@ async function makeGitRepo(): Promise<string> {
   await run("git", "config", "user.email", "test@test.com");
   await run("git", "config", "user.name", "Test");
   const proc = Bun.spawn(
-    ["sh", "-c", "echo 'init' > README.md && git add -A && git commit -m init"],
+    ["sh", "-c", "echo '.pi-adversary/' > .gitignore && echo 'init' > README.md && git add -A && git commit -m init"],
     { cwd: dir, stdout: "pipe", stderr: "pipe" }
   );
   await proc.exited;
@@ -54,6 +54,19 @@ function writeVerifyJson(dir: string, findings: unknown[] = []): string {
   return script;
 }
 
+/**
+ * Write a fake summarizer script that outputs a valid commit message JSON.
+ */
+function writeFakeSummarizer(dir: string, name = "fake-summarizer.sh"): string {
+  const script = join(dir, name);
+  writeFileSync(
+    script,
+    `#!/bin/sh\necho '{ "commitMessage": "feat: implement plan changes" }'\nexit 0\n`,
+    { mode: 0o755 }
+  );
+  return script;
+}
+
 describe("runLoop integration", () => {
   test("terminates clean when verify reports zero findings", async () => {
     const cwd = await makeGitRepo();
@@ -74,12 +87,15 @@ describe("runLoop integration", () => {
       turns: [],
     };
 
+    const summarizerScript = writeFakeSummarizer(cwd);
     const config: AdversaryConfig = {
       implementCommandTemplate: "true", // no-op implement
       verifyCommandTemplate: `${verifyScript} --output={verifyOutputFile}`,
+      summarizerCommandTemplate: summarizerScript,
       implementTimeoutMs: 10000,
       verifyTimeoutMs: 10000,
       prTimeoutMs: 10000,
+      summarizerTimeoutMs: 10000,
     };
 
     await runLoop({ cwd, state, planContent: "# Test Plan\nDo a thing.", maxTurns: 3, threshold: 7, config });
@@ -129,12 +145,15 @@ describe("runLoop integration", () => {
       turns: [],
     };
 
+    const summarizerScript2 = writeFakeSummarizer(cwd, "fake-summarizer-2.sh");
     const config: AdversaryConfig = {
       implementCommandTemplate: "true",
       verifyCommandTemplate: `${verifyScript} --output={verifyOutputFile}`,
+      summarizerCommandTemplate: summarizerScript2,
       implementTimeoutMs: 10000,
       verifyTimeoutMs: 10000,
       prTimeoutMs: 10000,
+      summarizerTimeoutMs: 10000,
     };
 
     await runLoop({ cwd, state, planContent: "# Test Plan 2\nDo another thing.", maxTurns: 2, threshold: 7, config });
@@ -163,9 +182,11 @@ describe("runLoop integration", () => {
     const config: AdversaryConfig = {
       implementCommandTemplate: "false", // exits non-zero
       verifyCommandTemplate: "true",
+      summarizerCommandTemplate: "true",
       implementTimeoutMs: 10000,
       verifyTimeoutMs: 10000,
       prTimeoutMs: 10000,
+      summarizerTimeoutMs: 10000,
     };
 
     await runLoop({ cwd, state, planContent: "# Test Plan Impl Fail\nDo a thing.", maxTurns: 3, threshold: 7, config });
@@ -191,12 +212,15 @@ describe("runLoop integration", () => {
       turns: [],
     };
 
+    const summarizerScriptVF = writeFakeSummarizer(cwd, "fake-summarizer-vf.sh");
     const config: AdversaryConfig = {
       implementCommandTemplate: "true",
       verifyCommandTemplate: "false", // exits non-zero, writes no JSON
+      summarizerCommandTemplate: summarizerScriptVF,
       implementTimeoutMs: 10000,
       verifyTimeoutMs: 10000,
       prTimeoutMs: 10000,
+      summarizerTimeoutMs: 10000,
     };
 
     await runLoop({ cwd, state, planContent: "# Test Plan Verify Fail\nDo a thing.", maxTurns: 3, threshold: 7, config });
@@ -241,12 +265,15 @@ describe("runLoop integration", () => {
       turns: [],
     };
 
+    const summarizerScriptVE = writeFakeSummarizer(cwd, "fake-summarizer-ve.sh");
     const config: AdversaryConfig = {
       implementCommandTemplate: "true",
       verifyCommandTemplate: `${verifyScript} --output={verifyOutputFile}`,
+      summarizerCommandTemplate: summarizerScriptVE,
       implementTimeoutMs: 10000,
       verifyTimeoutMs: 10000,
       prTimeoutMs: 10000,
+      summarizerTimeoutMs: 10000,
     };
 
     await runLoop({ cwd, state, planContent: "# Test Plan Error\nDo a thing.", maxTurns: 3, threshold: 7, config });
@@ -258,6 +285,104 @@ describe("runLoop integration", () => {
     // findings from error verify should still be recorded
     expect(state.turns[0]?.thresholdFindings).toHaveLength(1);
     expect(state.turns[0]?.thresholdFindings[0]?.title).toBe("Error Issue");
+  });
+
+  test("sets summarizer-failure outcome when summarizer exits non-zero", async () => {
+    const cwd = await makeGitRepo();
+    const runDir = join(cwd, ".pi-adversary", "runs", "test-run-summarizer-fail");
+    await initRunDir(runDir);
+    await snapshotPlan(runDir, "# Test Plan Summarizer Fail\nDo a thing.");
+
+    // Implement script that creates a file (so hasChanges returns true)
+    const implScript = join(cwd, "fake-impl-creates-file.sh");
+    writeFileSync(
+      implScript,
+      `#!/bin/sh\necho "change" >> ${join(cwd, "change.txt")}\ngit add -A\nexit 0\n`,
+      { mode: 0o755 }
+    );
+
+    // Summarizer that exits non-zero
+    const failSummarizerScript = join(cwd, "fail-summarizer.sh");
+    writeFileSync(
+      failSummarizerScript,
+      `#!/bin/sh\nexit 1\n`,
+      { mode: 0o755 }
+    );
+
+    const state: RunState = {
+      runDir,
+      planFile: join(runDir, "plan.txt"),
+      planTitle: "Test Plan Summarizer Fail",
+      branch: "adversary/test-branch",
+      baseBranch: "main",
+      startedAt: new Date().toISOString(),
+      turns: [],
+    };
+
+    const config: AdversaryConfig = {
+      implementCommandTemplate: implScript,
+      verifyCommandTemplate: "true",
+      summarizerCommandTemplate: failSummarizerScript,
+      implementTimeoutMs: 10000,
+      verifyTimeoutMs: 10000,
+      prTimeoutMs: 10000,
+      summarizerTimeoutMs: 10000,
+    };
+
+    await runLoop({ cwd, state, planContent: "# Test Plan Summarizer Fail\nDo a thing.", maxTurns: 3, threshold: 7, config });
+
+    expect(state.outcome).toBe("summarizer-failure");
+    expect(state.turns).toHaveLength(1);
+    expect(state.turns[0]?.outcome).toBe("summarizer-failure");
+  });
+
+  test("sets summarizer-failure outcome when summarizer produces invalid JSON", async () => {
+    const cwd = await makeGitRepo();
+    const runDir = join(cwd, ".pi-adversary", "runs", "test-run-summarizer-invalid");
+    await initRunDir(runDir);
+    await snapshotPlan(runDir, "# Test Plan Summarizer Invalid\nDo a thing.");
+
+    // Implement script that creates a file (so hasChanges returns true)
+    const implScript2 = join(cwd, "fake-impl-creates-file-2.sh");
+    writeFileSync(
+      implScript2,
+      `#!/bin/sh\necho "change2" >> ${join(cwd, "change2.txt")}\ngit add -A\nexit 0\n`,
+      { mode: 0o755 }
+    );
+
+    // Summarizer that outputs non-JSON
+    const invalidSummarizerScript = join(cwd, "invalid-summarizer.sh");
+    writeFileSync(
+      invalidSummarizerScript,
+      `#!/bin/sh\necho "not valid json"\nexit 0\n`,
+      { mode: 0o755 }
+    );
+
+    const state: RunState = {
+      runDir,
+      planFile: join(runDir, "plan.txt"),
+      planTitle: "Test Plan Summarizer Invalid",
+      branch: "adversary/test-branch",
+      baseBranch: "main",
+      startedAt: new Date().toISOString(),
+      turns: [],
+    };
+
+    const config: AdversaryConfig = {
+      implementCommandTemplate: implScript2,
+      verifyCommandTemplate: "true",
+      summarizerCommandTemplate: invalidSummarizerScript,
+      implementTimeoutMs: 10000,
+      verifyTimeoutMs: 10000,
+      prTimeoutMs: 10000,
+      summarizerTimeoutMs: 10000,
+    };
+
+    await runLoop({ cwd, state, planContent: "# Test Plan Summarizer Invalid\nDo a thing.", maxTurns: 3, threshold: 7, config });
+
+    expect(state.outcome).toBe("summarizer-failure");
+    expect(state.turns).toHaveLength(1);
+    expect(state.turns[0]?.outcome).toBe("summarizer-failure");
   });
 
   test("sets verify-blocked outcome when verify reports status=blocked", async () => {
@@ -295,12 +420,15 @@ describe("runLoop integration", () => {
       turns: [],
     };
 
+    const summarizerScriptVB = writeFakeSummarizer(cwd, "fake-summarizer-vb.sh");
     const config: AdversaryConfig = {
       implementCommandTemplate: "true",
       verifyCommandTemplate: `${verifyScript} --output={verifyOutputFile}`,
+      summarizerCommandTemplate: summarizerScriptVB,
       implementTimeoutMs: 10000,
       verifyTimeoutMs: 10000,
       prTimeoutMs: 10000,
+      summarizerTimeoutMs: 10000,
     };
 
     await runLoop({ cwd, state, planContent: "# Test Plan Blocked\nDo a thing.", maxTurns: 3, threshold: 7, config });

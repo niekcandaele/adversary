@@ -20,9 +20,11 @@ describe("loadConfig", () => {
     const config = await loadConfig(tmpDir);
     expect(config.implementCommandTemplate).toBe(DEFAULT_CONFIG.implementCommandTemplate);
     expect(config.verifyCommandTemplate).toBe(DEFAULT_CONFIG.verifyCommandTemplate);
+    expect(config.summarizerCommandTemplate).toBe(DEFAULT_CONFIG.summarizerCommandTemplate);
     expect(config.implementTimeoutMs).toBe(DEFAULT_CONFIG.implementTimeoutMs);
     expect(config.verifyTimeoutMs).toBe(DEFAULT_CONFIG.verifyTimeoutMs);
     expect(config.prTimeoutMs).toBe(DEFAULT_CONFIG.prTimeoutMs);
+    expect(config.summarizerTimeoutMs).toBe(DEFAULT_CONFIG.summarizerTimeoutMs);
   });
 
   test("loads config from file", async () => {
@@ -62,5 +64,34 @@ describe("loadConfig", () => {
     await writeFile(badConfigPath, "{ not valid json }");
 
     expect(loadConfig(tmpDir, badConfigPath)).rejects.toThrow();
+  });
+
+  test("loads summarizerCommandTemplate from file", async () => {
+    const configPath = join(tmpDir, ".pi-adversary-summarizer.json");
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        summarizerCommandTemplate: "my-summarizer -p @{promptFile}",
+        summarizerTimeoutMs: 60000,
+      })
+    );
+
+    const config = await loadConfig(tmpDir, configPath);
+    expect(config.summarizerCommandTemplate).toBe("my-summarizer -p @{promptFile}");
+    expect(config.summarizerTimeoutMs).toBe(60000);
+  });
+
+  test("summarizerCommandTemplate defaults when not in file", async () => {
+    const configPath = join(tmpDir, ".pi-adversary-no-summarizer.json");
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        implementCommandTemplate: "custom-impl",
+      })
+    );
+
+    const config = await loadConfig(tmpDir, configPath);
+    expect(config.summarizerCommandTemplate).toBe(DEFAULT_CONFIG.summarizerCommandTemplate);
+    expect(config.summarizerTimeoutMs).toBe(DEFAULT_CONFIG.summarizerTimeoutMs);
   });
 });

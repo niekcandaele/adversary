@@ -1,14 +1,16 @@
-import { resolve, basename } from "node:path";
+import { resolve, basename, join } from "node:path";
 import type { RunOptions, RunState } from "../types/index.js";
 import { runPreflight } from "../preflight/index.js";
 import { setupBranch } from "../branch/index.js";
 import { loadConfig } from "../config/index.js";
 import { buildRunDir, initRunDir, saveRunConfig, snapshotPlan } from "../artifacts/index.js";
 import { runLoop } from "../loop/index.js";
-import { generateFinalSummary, generatePrBody } from "../summary/index.js";
+import { generateFinalSummary, assemblePrBody } from "../summary/index.js";
+import { generatePrSummary } from "../summarizer/index.js";
 import { pushBranch } from "../git/index.js";
 import { createPr, PrError } from "../pr/index.js";
 import { extractPlanTitle, slugify } from "../utils/slugify.js";
+import { writeText } from "../utils/fs.js";
 
 export function validateRunOptions(options: RunOptions): void {
   if (options.turns < 1) {
@@ -114,14 +116,13 @@ export async function runCommand(options: RunOptions): Promise<void> {
   process.stdout.write(`\n[Summary] Generating final summary...\n`);
   await generateFinalSummary(state, options.severityThreshold);
 
-  const prBody = await generatePrBody(state, options.severityThreshold);
-
   process.stdout.write(`\n[Result] Outcome: ${state.outcome}\n`);
   process.stdout.write(`  Turns completed: ${state.turns.length}\n`);
 
   // 11. Push branch and create PR only on successful or capped outcomes
   const isFailureOutcome =
     state.outcome === "implement-failure" ||
+    state.outcome === "summarizer-failure" ||
     state.outcome === "verify-failure" ||
     state.outcome === "verify-blocked" ||
     state.outcome === "verify-error";
@@ -131,11 +132,46 @@ export async function runCommand(options: RunOptions): Promise<void> {
       `\n[Push] Skipping push/PR — run ended with failure outcome: ${state.outcome}\n`
     );
   } else {
+    // 12. Generate LLM PR summary BEFORE pushing — so we don't leave an orphaned
+    //     remote branch if the summarizer fails.
+    process.stdout.write(`\n[PR] Generating PR description...\n`);
+    let prTitle: string;
+    let prBody: string;
+    try {
+      const prSummary = await generatePrSummary({
+        config,
+        runDir,
+        branch: featureBranch,
+        baseBranch,
+        planTitle,
+        planContent,
+        cwd,
+        env: spawnEnv,
+      });
+
+      // Apply fallback if LLM title is empty or unreasonably long (>200 chars)
+      const rawTitle = prSummary.title;
+      if (!rawTitle || rawTitle.trim() === "" || rawTitle.length > 200) {
+        prTitle = planTitle.slice(0, 72);
+      } else {
+        prTitle = rawTitle;
+      }
+
+      prBody = assemblePrBody(state, options.severityThreshold, prSummary);
+      await writeText(join(state.runDir, "pr-body.md"), prBody);
+    } catch (e) {
+      state.prError = `PR summary generation failed: ${e}`;
+      await generateFinalSummary(state, options.severityThreshold);
+      process.stderr.write(`\n[PR] PR description generation failed: ${e}\n`);
+      throw e;
+    }
+
+    // 13. Push branch (after summary is ready — avoids orphaned remote branch)
     process.stdout.write(`\n[Push] Pushing branch ${featureBranch}...\n`);
     await pushBranch(featureBranch, "origin", cwd);
     process.stdout.write(`  Pushed OK\n`);
 
-    // 12. Create PR/MR
+    // 14. Create PR/MR
     process.stdout.write(`\n[PR] Creating draft PR/MR...\n`);
     try {
       const prUrl = await createPr({
@@ -143,6 +179,7 @@ export async function runCommand(options: RunOptions): Promise<void> {
         platform: preflight.platform,
         prCli: preflight.prCli,
         prBody,
+        prTitle,
         cwd,
         timeoutMs: config.prTimeoutMs,
         env: spawnEnv,
