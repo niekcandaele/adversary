@@ -29,6 +29,10 @@ export async function loadConfig(cwd: string, overridePath?: string): Promise<Ad
       typeof raw.verifyCommandTemplate === "string"
         ? raw.verifyCommandTemplate
         : DEFAULT_CONFIG.verifyCommandTemplate,
+    summarizerCommandTemplate:
+      typeof raw.summarizerCommandTemplate === "string"
+        ? raw.summarizerCommandTemplate
+        : DEFAULT_CONFIG.summarizerCommandTemplate,
     implementTimeoutMs:
       typeof raw.implementTimeoutMs === "number"
         ? raw.implementTimeoutMs
@@ -39,5 +43,9 @@ export async function loadConfig(cwd: string, overridePath?: string): Promise<Ad
         : DEFAULT_CONFIG.verifyTimeoutMs,
     prTimeoutMs:
       typeof raw.prTimeoutMs === "number" ? raw.prTimeoutMs : DEFAULT_CONFIG.prTimeoutMs,
+    summarizerTimeoutMs:
+      typeof raw.summarizerTimeoutMs === "number"
+        ? raw.summarizerTimeoutMs
+        : DEFAULT_CONFIG.summarizerTimeoutMs,
   };
 }

@@ -9,32 +9,29 @@ export class PrError extends Error {
   }
 }
 
-export function buildPrTitle(planTitle: string): string {
-  return `adversary: ${planTitle}`;
-}
-
 export async function createPr(options: {
   state: RunState;
   platform: Platform;
   /** The CLI command to use for PR creation. Accepts "gh", "glab", or a full path to a script. */
   prCli: "gh" | "glab" | (string & {});
   prBody: string;
+  /** PR/MR title — provided by LLM summarizer */
+  prTitle: string;
   cwd: string;
   timeoutMs: number;
   /** Optional env override for the spawned PR CLI subprocess. Defaults to process.env. */
   env?: NodeJS.ProcessEnv;
 }): Promise<string> {
-  const { state, platform, prCli, prBody, cwd, timeoutMs } = options;
-  const title = buildPrTitle(state.planTitle);
+  const { state, platform, prCli, prBody, prTitle, cwd, timeoutMs } = options;
 
-  process.stdout.write(`\nCreating draft PR/MR: "${title}"\n`);
+  process.stdout.write(`\nCreating draft PR/MR: "${prTitle}"\n`);
 
   let argv: string[];
   if (platform === "gitlab") {
     argv = [
       prCli, "mr", "create",
       "--draft",
-      "--title", title,
+      "--title", prTitle,
       "--description", prBody,
       "--source-branch", state.branch,
       "--target-branch", state.baseBranch,
@@ -45,7 +42,7 @@ export async function createPr(options: {
     argv = [
       prCli, "pr", "create",
       "--draft",
-      "--title", title,
+      "--title", prTitle,
       "--body", prBody,
       "--head", state.branch,
       "--base", state.baseBranch,

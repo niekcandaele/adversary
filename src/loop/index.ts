@@ -15,6 +15,7 @@ import {
   generateFindingsFile,
   generateHistoryFile,
 } from "../prompts/index.js";
+import { generateCommitMessage } from "../summarizer/index.js";
 import { writeText, writeJsonFile, readJsonFile, ensureDir } from "../utils/fs.js";
 import { interpolate } from "../utils/slugify.js";
 
@@ -57,6 +58,7 @@ function buildTemplateVars(
     turn: String(turn),
     maxTurns: String(maxTurns),
     branch: state.branch,
+    baseBranch: state.baseBranch,
   };
 }
 
@@ -208,11 +210,47 @@ export async function runLoop(options: {
 
     // 4. Commit if repo changed
     let commitSha: string | undefined;
+    let commitMessage: string | undefined;
     const repoChanged = await hasChanges(cwd);
     if (repoChanged) {
-      process.stdout.write(`\n[Turn ${turn}] Committing changes...\n`);
-      const commitMsg = `adversary: turn ${turn} implement\n\n[adversary: turn ${turn}/${maxTurns}, threshold ${threshold}]`;
-      commitSha = await commitAll(commitMsg, cwd);
+      process.stdout.write(`\n[Turn ${turn}] Generating commit message...\n`);
+      try {
+        commitMessage = await generateCommitMessage({
+          config,
+          turnDir,
+          branch: state.branch,
+          planTitle: state.planTitle,
+          turn,
+          cwd,
+          env: options.env,
+        });
+      } catch (e) {
+        process.stderr.write(`\n[Turn ${turn}] Commit message generation failed: ${e}\n`);
+        process.stderr.write(
+          `[Turn ${turn}] NOTE: Implement step made changes that remain uncommitted. Inspect the working tree before retrying.\n`
+        );
+        const turnResult: TurnResult = {
+          turn,
+          implementCommand,
+          verifyCommand: "",
+          implementDurationMs: implResult.durationMs,
+          verifyDurationMs: 0,
+          repoChanged: true,
+          // verifyStatus "error" here means verify was never reached, not that it ran and errored.
+          // We reuse the existing value since there is no "not-run" variant in VerifyStatus.
+          verifyStatus: "error",
+          thresholdFindings: [],
+          belowThresholdFindings: [],
+          outcome: "summarizer-failure",
+        };
+        state.turns.push(turnResult);
+        await writeTurnSummary(turnDir, turnResult);
+        state.outcome = "summarizer-failure";
+        return state;
+      }
+
+      process.stdout.write(`  Committing changes...\n`);
+      commitSha = await commitAll(commitMessage, cwd);
       process.stdout.write(`  Committed: ${commitSha.slice(0, 8)}\n`);
     } else {
       process.stdout.write(`\n[Turn ${turn}] No repo changes after implement — skipping commit.\n`);
@@ -355,6 +393,7 @@ export async function runLoop(options: {
       verifyDurationMs: verifyResult.durationMs,
       repoChanged,
       commitSha,
+      commitMessage,
       verifyStatus: report.status,
       thresholdFindings,
       belowThresholdFindings,
