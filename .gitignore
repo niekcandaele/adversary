@@ -28,9 +28,6 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .cache
 *.tsbuildinfo
 
-# adversary run artifacts
-.pi-adversary/
-
 # IntelliJ based IDEs
 .idea
 

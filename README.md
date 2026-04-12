@@ -45,7 +45,7 @@ Options:
   --turns <n>                   Maximum number of turns (default: 5)
   --severity-threshold <n>      Severity threshold 1..10 (default: 7)
   --base-branch <branch>        Override base branch (overrides config)
-  --config <path>               Path to config file (default: .pi-adversary.json)
+  --config <path>               Path to per-project config file (default: .adversary.json)
 ```
 
 ### GitHub example
@@ -64,7 +64,14 @@ adversary run --plan PLAN.md --turns 6 --severity-threshold 7
 
 ## Config File
 
-Create `.pi-adversary.json` in the repo root:
+Config is loaded from two sources and merged (later sources win):
+
+1. **Global config**: `~/.config/adversary/config.json` (or `$XDG_CONFIG_HOME/adversary/config.json`)
+2. **Per-project config**: `.adversary.json` in the repo root (or `--config <path>`)
+
+Merge precedence: `defaults < global config < per-project config < CLI flags`
+
+Create `.adversary.json` in the repo root (or a global config for shared settings):
 
 ```json
 {
@@ -166,14 +173,16 @@ The verify command must write a JSON file to `{verifyOutputFile}` with this sche
 
 ## Artifacts
 
-All run artifacts are stored under `.pi-adversary/runs/<timestamp>-<plan-slug>/`.
+All run artifacts are stored under `~/.local/state/adversary/<repo>-<hash>/runs/<timestamp>-<plan-slug>/` (or `$XDG_STATE_HOME/adversary/...`). `<repo>` is the basename of the repository directory and `<hash>` is the first 8 characters of the SHA-256 hash of the absolute repository path, ensuring uniqueness across repos with the same name.
 
-> **Warning:** Run artifacts contain full-fidelity logs including all prompts and agent outputs. These can be large and may contain sensitive information. Consider adding `.pi-adversary/` to your `.gitignore`.
+Artifacts are stored outside the repository, so they never appear as untracked files and no `.gitignore` entry is needed.
+
+> **Note:** Run artifacts contain full-fidelity logs including all prompts and agent outputs. These can be large and may contain sensitive information.
 
 Structure:
 
 ```
-.pi-adversary/
+~/.local/state/adversary/<repo-name>-<hash>/
   runs/
     20260410-123456-add-json-verify-output/
       run-config.json

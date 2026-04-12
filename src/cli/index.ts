@@ -29,13 +29,18 @@ Options for 'run':
   --turns <n>                   Maximum number of turns (default: 5)
   --severity-threshold <n>      Severity threshold 1..10 (default: 7)
   --base-branch <branch>        Override base branch (overrides config)
-  --config <path>               Path to config file (default: .pi-adversary.json)
+  --config <path>               Path to per-project config file (default: .adversary.json)
+                                  See "Config files" section below for merge precedence.
 
 Global options:
   --help, -h                    Show this help
   --version, -v                 Show version
 
-Config file (.pi-adversary.json):
+Config files (merged in order: defaults < global < per-project < CLI flags):
+  Global:      ~/.config/adversary/config.json  (or $XDG_CONFIG_HOME/adversary/config.json)
+  Per-project: .adversary.json  (in repo root, or --config path)
+
+Config file fields:
   {
     "baseBranch": "main",
     "implementCommandTemplate": "pi -p @{promptFile}",
@@ -46,6 +51,11 @@ Config file (.pi-adversary.json):
     "prTimeoutMs": 300000,
     "summarizerTimeoutMs": 300000
   }
+
+Run artifacts:
+  Stored in ~/.local/state/adversary/<repo>-<hash>/runs/ (or $XDG_STATE_HOME/adversary/...)
+  <repo>  = basename of the repo directory
+  <hash>  = first 8 characters of the SHA-256 hash of the absolute repo path
 
 Template variables:
   {cwd}              Working directory

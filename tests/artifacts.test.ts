@@ -1,16 +1,33 @@
-import { test, expect, describe } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { buildRunDir } from "../src/artifacts/index.js";
 import { slugify } from "../src/utils/slugify.js";
 
 describe("buildRunDir", () => {
-  test("path starts with cwd", () => {
-    const dir = buildRunDir("/repo", "my-plan");
-    expect(dir.startsWith("/repo")).toBe(true);
+  let savedXdgStateHome: string | undefined;
+
+  beforeEach(() => {
+    savedXdgStateHome = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = "/tmp/test-state";
   });
 
-  test("includes artifact root", () => {
+  afterEach(() => {
+    if (savedXdgStateHome === undefined) {
+      delete process.env.XDG_STATE_HOME;
+    } else {
+      process.env.XDG_STATE_HOME = savedXdgStateHome;
+    }
+  });
+
+  test("path is under XDG state dir, not cwd", () => {
     const dir = buildRunDir("/repo", "my-plan");
-    expect(dir).toContain(".pi-adversary/runs");
+    expect(dir.startsWith("/tmp/test-state/adversary/")).toBe(true);
+    // Must NOT start with cwd
+    expect(dir.startsWith("/repo")).toBe(false);
+  });
+
+  test("path contains 'runs' subdir", () => {
+    const dir = buildRunDir("/repo", "my-plan");
+    expect(dir).toContain("/runs/");
   });
 
   test("includes slug in dir name", () => {
@@ -19,12 +36,16 @@ describe("buildRunDir", () => {
   });
 
   test("path is deterministic given same input (barring timestamp)", () => {
-    // Two calls should have same structure, different timestamps
     const dir1 = buildRunDir("/repo", "my-plan");
     const dir2 = buildRunDir("/repo", "my-plan");
     // Both should contain "my-plan" in the path
     expect(dir1).toContain("my-plan");
     expect(dir2).toContain("my-plan");
+  });
+
+  test("state dir encodes cwd basename", () => {
+    const dir = buildRunDir("/projects/coolrepo", "my-plan");
+    expect(dir).toContain("coolrepo-");
   });
 });
 

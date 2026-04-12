@@ -1,4 +1,3 @@
-import { join } from "node:path";
 import { isGitRepo, isCleanWorkingTree, getRemoteUrl } from "../git/index.js";
 import { fileExists } from "../utils/fs.js";
 
@@ -73,7 +72,6 @@ export interface PreflightResult {
   platform: Platform;
   remoteUrl: string | null;
   prCli: "gh" | "glab";
-  piAdversaryIgnoreWarning?: string;
 }
 
 export async function runPreflight(
@@ -159,25 +157,10 @@ export async function runPreflight(
     throw new PreflightError(`Verify command preflight failed: ${verifyCheck.reason}`);
   }
 
-  // 9. Check .pi-adversary/ gitignore warning
-  let piAdversaryIgnoreWarning: string | undefined;
-  const gitignorePath = join(cwd, ".gitignore");
-  if (fileExists(gitignorePath)) {
-    const gitignoreContent = await Bun.file(gitignorePath).text();
-    if (!gitignoreContent.includes(".pi-adversary")) {
-      piAdversaryIgnoreWarning =
-        "Warning: .pi-adversary/ is not in .gitignore. Run artifacts may be committed to the repository.";
-    }
-  } else {
-    piAdversaryIgnoreWarning =
-      "Warning: No .gitignore found. Consider adding .pi-adversary/ to .gitignore to avoid committing run artifacts.";
-  }
-
   return {
     cwd,
     platform,
     remoteUrl,
     prCli,
-    piAdversaryIgnoreWarning,
   };
 }

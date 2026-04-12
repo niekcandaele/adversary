@@ -1,7 +1,32 @@
-import { join } from "node:path";
+import { join, relative, basename } from "node:path";
+import { homedir } from "node:os";
 import type { RunState, VerifyFinding, RunOutcome, PrSummaryOutput } from "../types/index.js";
 import { writeText, writeJsonFile } from "../utils/fs.js";
 import { formatDuration } from "../utils/slugify.js";
+
+/** Replace home directory prefix with `~` for display in PR body. */
+function sanitizePath(p: string): string {
+  const home = homedir();
+  if (p.startsWith(home + "/") || p === home) {
+    return "~" + p.slice(home.length);
+  }
+  return p;
+}
+
+/** Make planFile relative to cwd for display; fall back to sanitized absolute. */
+function displayPlanFile(planFile: string, cwd: string): string {
+  try {
+    const rel = relative(cwd, planFile);
+    // Only use relative if it doesn't escape cwd at all
+    if (!rel.startsWith("../")) {
+      // Guard against empty string when planFile === cwd (directory-like path)
+      return rel || basename(planFile);
+    }
+  } catch {
+    // fall through
+  }
+  return sanitizePath(planFile);
+}
 
 function findingsMd(findings: VerifyFinding[], heading: string): string {
   if (findings.length === 0) return `### ${heading}\n\n_None._\n`;
@@ -45,6 +70,7 @@ export async function generateFinalSummary(state: RunState, threshold: number): 
     0
   );
 
+  // planFile and runDir are embedded as-is below — unsanitized local artifacts, not public-facing
   const md = `# Adversary Run Summary
 
 ## Overview
@@ -115,7 +141,7 @@ Run artifacts are stored at: \`${state.runDir}\`
 /**
  * Assemble a rich PR body by stitching LLM-generated sections with deterministic metadata.
  */
-export function assemblePrBody(state: RunState, threshold: number, llm: PrSummaryOutput): string {
+export function assemblePrBody(state: RunState, threshold: number, llm: PrSummaryOutput, cwd: string = process.cwd()): string {
   const allThreshold: VerifyFinding[] = [];
   const allBelow: VerifyFinding[] = [];
   const lastTurn = state.turns.length > 0 ? state.turns[state.turns.length - 1] : undefined;
@@ -159,7 +185,7 @@ ${llm.testPlan}
 
 | Field | Value |
 |-------|-------|
-| Plan | \`${state.planFile}\` |
+| Plan | \`${displayPlanFile(state.planFile, cwd)}\` |
 | Branch | \`${state.branch}\` |
 | Base | \`${state.baseBranch}\` |
 | Turns | ${state.turns.length} |
@@ -174,7 +200,7 @@ ${thresholdSection}
 
 ${belowSection}
 
-Artifacts: \`${state.runDir}\`
+Artifacts: \`${sanitizePath(state.runDir)}\`
 
 </details>
 `;

@@ -43,10 +43,6 @@ export async function runCommand(options: RunOptions): Promise<void> {
   process.stdout.write(`\n[Preflight] Running checks...\n`);
   const preflight = await runPreflight(cwd, planFile, spawnEnv);
 
-  if (preflight.piAdversaryIgnoreWarning) {
-    process.stderr.write(`\n  ${preflight.piAdversaryIgnoreWarning}\n`);
-  }
-
   process.stdout.write(`  Platform: ${preflight.platform}\n`);
   process.stdout.write(`  PR CLI: ${preflight.prCli}\n`);
   process.stdout.write(`  Remote: ${preflight.remoteUrl ?? "none"}\n`);
@@ -158,7 +154,7 @@ export async function runCommand(options: RunOptions): Promise<void> {
         prTitle = rawTitle;
       }
 
-      prBody = assemblePrBody(state, options.severityThreshold, prSummary);
+      prBody = assemblePrBody(state, options.severityThreshold, prSummary, cwd);
       await writeText(join(state.runDir, "pr-body.md"), prBody);
     } catch (e) {
       state.prError = `PR summary generation failed: ${e}`;

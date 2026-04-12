@@ -85,11 +85,11 @@ describe("interpolate", () => {
   test("handles all plan template vars", () => {
     const vars = {
       cwd: "/repo",
-      planFile: "/repo/.pi-adversary/runs/ts-plan/plan.txt",
-      promptFile: "/repo/.pi-adversary/runs/ts-plan/turn-1/implement-input.md",
-      findingsFile: "/repo/.pi-adversary/runs/ts-plan/turn-1/current-findings.md",
-      historyFile: "/repo/.pi-adversary/runs/ts-plan/turn-1/run-history.md",
-      verifyOutputFile: "/repo/.pi-adversary/runs/ts-plan/turn-1/verify.json",
+      planFile: "/home/user/.local/state/adversary/repo-abcd1234/runs/ts-plan/plan.txt",
+      promptFile: "/home/user/.local/state/adversary/repo-abcd1234/runs/ts-plan/turn-1/implement-input.md",
+      findingsFile: "/home/user/.local/state/adversary/repo-abcd1234/runs/ts-plan/turn-1/current-findings.md",
+      historyFile: "/home/user/.local/state/adversary/repo-abcd1234/runs/ts-plan/turn-1/run-history.md",
+      verifyOutputFile: "/home/user/.local/state/adversary/repo-abcd1234/runs/ts-plan/turn-1/verify.json",
       threshold: "7",
       turn: "1",
       maxTurns: "5",
