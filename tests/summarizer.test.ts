@@ -242,7 +242,38 @@ describe("generateCommitMessage", () => {
         cwd,
       });
 
-      expect(result).toBe("feat: add smart commit messages");
+      expect(result.commitMessage).toBe("feat: add smart commit messages");
+      expect(result.turnSummary).toBe("");
+    } finally {
+      await Bun.spawn(["rm", "-rf", tmpDir, cwd]).exited;
+    }
+  });
+
+  test("returns turnSummary when provided by summarizer", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "adversary-gen-commit-summary-"));
+    const cwd = await makeGitRepo();
+    try {
+      const script = join(tmpDir, "summarizer.sh");
+      writeFileSync(
+        script,
+        `#!/bin/sh\necho '{ "commitMessage": "feat: add analytics", "turnSummary": "Added ClickHouse reader and analytics service." }'\nexit 0\n`,
+        { mode: 0o755 }
+      );
+      const turnDir = join(tmpDir, "turn-1");
+      await Bun.spawn(["mkdir", "-p", turnDir], { cwd: tmpDir }).exited;
+
+      const config = makeConfig(script);
+      const result = await generateCommitMessage({
+        config,
+        turnDir,
+        branch: "adversary/test",
+        planTitle: "Test Plan",
+        turn: 1,
+        cwd,
+      });
+
+      expect(result.commitMessage).toBe("feat: add analytics");
+      expect(result.turnSummary).toBe("Added ClickHouse reader and analytics service.");
     } finally {
       await Bun.spawn(["rm", "-rf", tmpDir, cwd]).exited;
     }

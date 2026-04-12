@@ -40,7 +40,7 @@ export function parseCommand(cmd: string): string[] {
   return args;
 }
 
-const HEARTBEAT_INTERVAL_MS = 30_000;
+const SPINNER_INTERVAL_MS = 500;
 
 export async function runStep(options: {
   command: string;
@@ -59,7 +59,11 @@ export async function runStep(options: {
   const argv = parseCommand(command);
   const start = Date.now();
 
-  process.stdout.write(`  [${label}] running: ${command}\n`);
+  const isTTY = process.stdout.isTTY ?? false;
+
+  if (!isTTY) {
+    process.stdout.write(`  [${label}] started\n`);
+  }
 
   const proc = Bun.spawn(argv, {
     cwd,
@@ -72,12 +76,14 @@ export async function runStep(options: {
   let stdoutText = "";
   let stderrText = "";
 
-  // Heartbeat: print elapsed time every 30s so the operator knows the process
-  // is still alive during long-running steps.
-  const heartbeatHandle = setInterval(() => {
-    const elapsed = formatDuration(Date.now() - start);
-    process.stdout.write(`  [${label}] still running (${elapsed} elapsed)...\n`);
-  }, HEARTBEAT_INTERVAL_MS);
+  // In-place spinner: update the same line with elapsed time.
+  // Non-TTY: no spinner, just the start/done lines.
+  const spinnerHandle = isTTY
+    ? setInterval(() => {
+        const elapsed = formatDuration(Date.now() - start);
+        process.stdout.write(`\x1b[2K\r  [${label}] running... ${elapsed}`);
+      }, SPINNER_INTERVAL_MS)
+    : null;
 
   // Timeout: plain (non-async) callback avoids the race condition where an
   // async setTimeout callback would schedule work after the outer try/finally
@@ -103,7 +109,7 @@ export async function runStep(options: {
     await proc.exited;
   } finally {
     clearTimeout(timeoutHandle);
-    clearInterval(heartbeatHandle);
+    if (spinnerHandle) clearInterval(spinnerHandle);
   }
 
   const durationMs = Date.now() - start;
@@ -113,13 +119,18 @@ export async function runStep(options: {
   await writeText(stdoutPath, stdoutText);
   await writeText(stderrPath, stderrText);
 
+  // Clear spinner line and print final status
+  if (isTTY) {
+    process.stdout.write(`\x1b[2K\r`);
+  }
+
   if (timedOut) {
     process.stdout.write(
       `  [${label}] TIMED OUT after ${formatDuration(durationMs)} (limit: ${formatDuration(timeoutMs)})\n`
     );
   } else {
     process.stdout.write(
-      `  [${label}] exited ${exitCode} in ${formatDuration(durationMs)}\n`
+      `  [${label}] done in ${formatDuration(durationMs)}\n`
     );
   }
 

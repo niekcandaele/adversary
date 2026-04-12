@@ -18,6 +18,7 @@ import {
 import { generateCommitMessage } from "../summarizer/index.js";
 import { writeText, writeJsonFile, readJsonFile, ensureDir } from "../utils/fs.js";
 import { interpolate } from "../utils/slugify.js";
+import { formatFindingsTable } from "../ui/findingsTable.js";
 
 export class VerifyParseError extends Error {
   constructor(message: string) {
@@ -178,14 +179,13 @@ export async function runLoop(options: {
     await writeText(join(turnDir, "implement-command.txt"), implementCommand);
 
     // 3. Run implement
-    process.stdout.write(`\n[Turn ${turn}] Running implementer...\n`);
     const implResult = await runStep({
       command: implementCommand,
       cwd,
       stdoutPath: join(turnDir, "implement.stdout.log"),
       stderrPath: join(turnDir, "implement.stderr.log"),
       timeoutMs: config.implementTimeoutMs,
-      label: `implement-${turn}`,
+      label: "implement",
       env: options.env,
     });
 
@@ -211,11 +211,11 @@ export async function runLoop(options: {
     // 4. Commit if repo changed
     let commitSha: string | undefined;
     let commitMessage: string | undefined;
+    let turnSummary: string | undefined;
     const repoChanged = await hasChanges(cwd);
     if (repoChanged) {
-      process.stdout.write(`\n[Turn ${turn}] Generating commit message...\n`);
       try {
-        commitMessage = await generateCommitMessage({
+        const summarizerResult = await generateCommitMessage({
           config,
           turnDir,
           branch: state.branch,
@@ -224,10 +224,12 @@ export async function runLoop(options: {
           cwd,
           env: options.env,
         });
+        commitMessage = summarizerResult.commitMessage;
+        turnSummary = summarizerResult.turnSummary;
       } catch (e) {
-        process.stderr.write(`\n[Turn ${turn}] Commit message generation failed: ${e}\n`);
+        process.stderr.write(`  Commit message generation failed: ${e}\n`);
         process.stderr.write(
-          `[Turn ${turn}] NOTE: Implement step made changes that remain uncommitted. Inspect the working tree before retrying.\n`
+          `  NOTE: Implement step made changes that remain uncommitted. Inspect the working tree before retrying.\n`
         );
         const turnResult: TurnResult = {
           turn,
@@ -236,8 +238,6 @@ export async function runLoop(options: {
           implementDurationMs: implResult.durationMs,
           verifyDurationMs: 0,
           repoChanged: true,
-          // verifyStatus "error" here means verify was never reached, not that it ran and errored.
-          // We reuse the existing value since there is no "not-run" variant in VerifyStatus.
           verifyStatus: "error",
           thresholdFindings: [],
           belowThresholdFindings: [],
@@ -249,11 +249,14 @@ export async function runLoop(options: {
         return state;
       }
 
-      process.stdout.write(`  Committing changes...\n`);
       commitSha = await commitAll(commitMessage, cwd);
       process.stdout.write(`  Committed: ${commitSha.slice(0, 8)}\n`);
+
+      if (turnSummary) {
+        process.stdout.write(`\n  Summary: ${turnSummary}\n`);
+      }
     } else {
-      process.stdout.write(`\n[Turn ${turn}] No repo changes after implement — skipping commit.\n`);
+      process.stdout.write(`\n  No repo changes after implement — skipping commit.\n`);
     }
 
     // 5. Build verify command
@@ -261,14 +264,14 @@ export async function runLoop(options: {
     await writeText(join(turnDir, "verify-command.txt"), verifyCommand);
 
     // 6. Run verify
-    process.stdout.write(`\n[Turn ${turn}] Running verifier...\n`);
+    process.stdout.write("\n");
     const verifyResult = await runStep({
       command: verifyCommand,
       cwd,
       stdoutPath: join(turnDir, "verify.stdout.log"),
       stderrPath: join(turnDir, "verify.stderr.log"),
       timeoutMs: config.verifyTimeoutMs,
-      label: `verify-${turn}`,
+      label: "verify",
       env: options.env,
     });
 
@@ -373,9 +376,14 @@ export async function runLoop(options: {
     // 9. Split findings by threshold
     const { thresholdFindings, belowThresholdFindings } = filterFindings(report.findings, threshold);
 
-    process.stdout.write(`\n[Turn ${turn}] Verify results: ${report.findings.length} total findings, ${thresholdFindings.length} at/above threshold ${threshold}\n`);
+    // 10. Display findings
+    if (thresholdFindings.length > 0) {
+      process.stdout.write("\n" + formatFindingsTable(thresholdFindings) + "\n");
+    } else {
+      process.stdout.write(`\n  ✓ No findings at or above severity threshold ${threshold}\n`);
+    }
 
-    // 10. Determine outcome
+    // 11. Determine outcome
     let outcome: TurnResult["outcome"];
     if (thresholdFindings.length === 0) {
       outcome = "clean";
@@ -394,6 +402,7 @@ export async function runLoop(options: {
       repoChanged,
       commitSha,
       commitMessage,
+      turnSummary,
       verifyStatus: report.status,
       thresholdFindings,
       belowThresholdFindings,
@@ -403,18 +412,17 @@ export async function runLoop(options: {
     await writeTurnSummary(turnDir, turnResult);
 
     if (outcome === "clean") {
-      process.stdout.write(`\n[Turn ${turn}] Clean! Zero threshold findings. Stopping loop.\n`);
       state.outcome = "clean";
       return state;
     }
 
     if (outcome === "capped") {
-      process.stdout.write(`\n[Turn ${turn}] Max turns reached with ${thresholdFindings.length} threshold findings remaining.\n`);
+      process.stdout.write(`\n  ${thresholdFindings.length} findings, ${thresholdFindings.length} at/above threshold — max turns reached\n`);
       state.outcome = "capped";
       return state;
     }
 
-    process.stdout.write(`\n[Turn ${turn}] ${thresholdFindings.length} threshold finding(s) remain. Continuing...\n`);
+    process.stdout.write(`\n  ${thresholdFindings.length} findings, ${thresholdFindings.length} at/above threshold — continuing to turn ${turn + 1}\n`);
   }
 
   // Should not reach here
