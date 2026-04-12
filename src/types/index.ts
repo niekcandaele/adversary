@@ -50,6 +50,7 @@ export const DEFAULT_CONFIG: AdversaryConfig = {
 
 export interface SummarizerOutput {
   commitMessage: string;
+  turnSummary: string;
 }
 
 export interface PrSummaryOutput {
@@ -101,6 +102,7 @@ export interface TurnResult {
   repoChanged: boolean;
   commitSha?: string;
   commitMessage?: string;
+  turnSummary?: string;
   verifyStatus: VerifyStatus;
   thresholdFindings: VerifyFinding[];
   belowThresholdFindings: VerifyFinding[];

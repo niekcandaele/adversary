@@ -82,7 +82,7 @@ export async function generateCommitMessage(options: {
   turn: number;
   cwd: string;
   env?: NodeJS.ProcessEnv;
-}): Promise<string> {
+}): Promise<SummarizerOutput> {
   const { config, turnDir, branch, planTitle, turn, cwd, env } = options;
 
   const promptPath = join(turnDir, "commit-msg-prompt.md");
@@ -104,7 +104,7 @@ export async function generateCommitMessage(options: {
     stdoutPath: join(turnDir, "commit-msg-summarizer.stdout.log"),
     stderrPath: join(turnDir, "commit-msg-summarizer.stderr.log"),
     timeoutMs: config.summarizerTimeoutMs,
-    label: `summarizer-commit-${turn}`,
+    label: `commit`,
     env,
   });
 
@@ -121,7 +121,9 @@ export async function generateCommitMessage(options: {
     throw new Error(`Summarizer returned invalid commitMessage: ${JSON.stringify(parsed)}`);
   }
 
-  return (parsed as unknown as SummarizerOutput).commitMessage;
+  const turnSummary = typeof parsed.turnSummary === "string" ? parsed.turnSummary : "";
+
+  return { commitMessage: parsed.commitMessage as string, turnSummary };
 }
 
 export async function generatePrSummary(options: {
@@ -154,7 +156,7 @@ export async function generatePrSummary(options: {
     stdoutPath: join(runDir, "pr-summarizer.stdout.log"),
     stderrPath: join(runDir, "pr-summarizer.stderr.log"),
     timeoutMs: config.summarizerTimeoutMs,
-    label: "summarizer-pr",
+    label: "pr-summary",
     env,
   });
 

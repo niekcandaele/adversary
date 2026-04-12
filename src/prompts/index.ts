@@ -30,9 +30,10 @@ Generate a concise, meaningful git commit message for the changes made on this b
    - Subject line: max 72 characters, imperative mood (e.g. "Add", "Fix", "Refactor")
    - Optional body: explain why, not what (wrap at 72 chars)
    - Do NOT include metadata like "adversary: turn N" — write a genuine description of the work
-3. Return ONLY a JSON object (no other text):
+3. Write a turn summary (2-4 sentences) describing what was done this turn and the current status. This is shown to the operator in the CLI.
+4. Return ONLY a JSON object (no other text):
    \`\`\`json
-   { "commitMessage": "Subject line\\n\\nOptional body paragraph." }
+   { "commitMessage": "Subject line\\n\\nOptional body paragraph.", "turnSummary": "Brief description of what was implemented and current status." }
    \`\`\`
 
 Return only the JSON object.
