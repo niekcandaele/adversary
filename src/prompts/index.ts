@@ -143,10 +143,15 @@ export async function generateLaterTurnPrompt(options: {
   maxTurns: number;
   branch: string;
   thresholdFindings: VerifyFinding[];
+  commitError?: string;
   historyContent: string;
   outputPath: string;
 }): Promise<string> {
-  const { planContent, threshold, turn, maxTurns, branch, thresholdFindings, historyContent, outputPath } = options;
+  const { planContent, threshold, turn, maxTurns, branch, thresholdFindings, commitError, historyContent, outputPath } = options;
+
+  const commitErrorMd = commitError
+    ? `### Commit Failure (severity 10)\n\nYour previous changes failed to commit due to a pre-commit hook error:\n\n\`\`\`\n${commitError}\n\`\`\`\n\nFix the issues listed above. The uncommitted changes from last turn are still in the working tree.\n\n---\n\n`
+    : "";
 
   const findingsMd = thresholdFindings.length > 0
     ? thresholdFindings
@@ -158,7 +163,7 @@ export async function generateLaterTurnPrompt(options: {
           return `### Finding ${i + 1}: ${f.title} (severity ${f.severity})${loc}${sources}\n\n${f.description}`;
         })
         .join("\n\n---\n\n")
-    : "_No threshold findings._";
+    : (commitError ? "" : "_No threshold findings._");
 
   const content = `# Adversarial Implementation Loop — Turn ${turn} of ${maxTurns}
 
@@ -183,7 +188,7 @@ Threshold: **${threshold}** (you must fix findings with severity >= ${threshold}
 
 ## Current Findings to Fix (severity >= ${threshold})
 
-${findingsMd}
+${commitErrorMd}${findingsMd}
 
 ---
 
@@ -243,10 +248,14 @@ export async function generateHistoryFile(
         ? "None"
         : t.belowThresholdFindings.map((f) => `${f.title} (sev ${f.severity})`).join(", ");
 
+    const commitErrorLine = t.commitError
+      ? `\n- Commit error: ${t.commitError.split("\n")[0]?.slice(0, 200)}`
+      : "";
+
     return `## Turn ${t.turn}
 - Implement duration: ${formatDuration(t.implementDurationMs)}
 - Verify duration: ${formatDuration(t.verifyDurationMs)}
-- Repo changed: ${t.repoChanged ? "yes" : "no"}${t.commitSha ? ` (commit: ${t.commitSha.slice(0, 8)})` : ""}
+- Repo changed: ${t.repoChanged ? "yes" : "no"}${t.commitSha ? ` (commit: ${t.commitSha.slice(0, 8)})` : ""}${commitErrorLine}
 - Verify status: ${t.verifyStatus}
 - Threshold findings: ${thresholdSummary}
 - Below-threshold findings: ${belowSummary}

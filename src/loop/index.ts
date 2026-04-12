@@ -8,7 +8,7 @@ import type {
   TemplateVars,
 } from "../types/index.js";
 import { runStep } from "../runner/index.js";
-import { hasChanges, commitAll } from "../git/index.js";
+import { hasChanges, commitAll, GitError } from "../git/index.js";
 import {
   generateFirstTurnPrompt,
   generateLaterTurnPrompt,
@@ -164,6 +164,7 @@ export async function runLoop(options: {
         maxTurns,
         branch: state.branch,
         thresholdFindings,
+        commitError: lastTurn?.commitError,
         historyContent,
         outputPath: promptPath,
       });
@@ -249,7 +250,32 @@ export async function runLoop(options: {
         return state;
       }
 
-      commitSha = await commitAll(commitMessage, cwd);
+      try {
+        commitSha = await commitAll(commitMessage, cwd);
+      } catch (e) {
+        if (e instanceof GitError) {
+          const errorMsg = e.message;
+          process.stderr.write(`\n  Error: Commit failed (pre-commit hook?): ${errorMsg.slice(0, 500)}\n`);
+          process.stderr.write(`  Changes remain in working tree — next turn will address the issue.\n`);
+          const turnResult: TurnResult = {
+            turn,
+            implementCommand,
+            verifyCommand: "",
+            implementDurationMs: implResult.durationMs,
+            verifyDurationMs: 0,
+            repoChanged: true,
+            commitError: errorMsg,
+            verifyStatus: "error",
+            thresholdFindings: [],
+            belowThresholdFindings: [],
+            outcome: "commit-failure",
+          };
+          state.turns.push(turnResult);
+          await writeTurnSummary(turnDir, turnResult);
+          continue;
+        }
+        throw e;
+      }
       process.stdout.write(`  Committed: ${commitSha.slice(0, 8)}\n`);
 
       if (turnSummary) {
@@ -425,8 +451,9 @@ export async function runLoop(options: {
     process.stdout.write(`\n  ${thresholdFindings.length} findings, ${thresholdFindings.length} at/above threshold — continuing to turn ${turn + 1}\n`);
   }
 
-  // Should not reach here
-  state.outcome = "capped";
+  // Loop exhausted — check if last turn was a commit failure
+  const lastTurn = state.turns[state.turns.length - 1];
+  state.outcome = lastTurn?.outcome === "commit-failure" ? "commit-failure" : "capped";
   return state;
 }
 

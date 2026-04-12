@@ -86,6 +86,7 @@ export interface RunOptions {
 export type RunOutcome =
   | "clean"
   | "capped"
+  | "commit-failure"
   | "implement-failure"
   | "summarizer-failure"
   | "verify-failure"
@@ -102,11 +103,12 @@ export interface TurnResult {
   repoChanged: boolean;
   commitSha?: string;
   commitMessage?: string;
+  commitError?: string;
   turnSummary?: string;
   verifyStatus: VerifyStatus;
   thresholdFindings: VerifyFinding[];
   belowThresholdFindings: VerifyFinding[];
-  outcome: "continue" | "clean" | "capped" | "implement-failure" | "summarizer-failure" | "verify-failure" | "verify-blocked" | "verify-error";
+  outcome: "continue" | "clean" | "capped" | "commit-failure" | "implement-failure" | "summarizer-failure" | "verify-failure" | "verify-blocked" | "verify-error";
 }
 
 export interface RunState {

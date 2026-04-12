@@ -121,6 +121,7 @@ export async function runCommand(options: RunOptions): Promise<void> {
 
   // 11. Push branch and create PR only on successful or capped outcomes
   const isFailureOutcome =
+    state.outcome === "commit-failure" ||
     state.outcome === "implement-failure" ||
     state.outcome === "summarizer-failure" ||
     state.outcome === "verify-failure" ||
