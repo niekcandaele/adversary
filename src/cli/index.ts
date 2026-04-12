@@ -44,7 +44,7 @@ Config file fields:
   {
     "baseBranch": "main",
     "implementCommandTemplate": "pi -p @{promptFile}",
-    "verifyCommandTemplate": "pi -p \\"/skill:verify --mode=report-only --format=json --output={verifyOutputFile}\\"",
+    "verifyCommandTemplate": "pi -p \\"/skill:verify --mode=report-only --format=json --output={verifyOutputFile} --plan-file={planFile}\\"",
     "summarizerCommandTemplate": "pi -p @{promptFile}",
     "implementTimeoutMs": 2700000,
     "verifyTimeoutMs": 5400000,
