@@ -68,7 +68,7 @@ export function formatFindingsTable(findings: VerifyFinding[]): string {
   out.push(hline("├", "┼", "┤"));
 
   for (let i = 0; i < findings.length; i++) {
-    const f = findings[i];
+    const f = findings[i]!;
     if (i > 0) out.push(hline("├", "┼", "┤"));
 
     out.push(dataRow(String(i + 1), truncate(f.title, titleW), String(f.severity), f.sources.join(", ")));
