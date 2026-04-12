@@ -1,4 +1,5 @@
 import { runCommand } from "./run.js";
+import { configCommand } from "./config.js";
 import type { RunOptions } from "../types/index.js";
 import { VERSION } from "../generated/version.js";
 
@@ -22,7 +23,8 @@ Usage:
   adversary run --plan <path> [options]
 
 Commands:
-  run    Run the adversarial loop
+  run      Run the adversarial loop
+  config   Print resolved configuration as JSON
 
 Options for 'run':
   --plan <path>                 Path to the plan file (required)
@@ -31,6 +33,9 @@ Options for 'run':
   --base-branch <branch>        Override base branch (overrides config)
   --config <path>               Path to per-project config file (default: .adversary.json)
                                   See "Config files" section below for merge precedence.
+
+Options for 'config':
+  --config <path>               Path to per-project config file (default: .adversary.json)
 
 Global options:
   --help, -h                    Show this help
@@ -79,6 +84,8 @@ Timeouts (defaults):
 Examples:
   adversary run --plan /path/to/plan.md --turns 6 --severity-threshold 7
   adversary run --plan plan.md --base-branch main --turns 3 --severity-threshold 5
+  adversary config
+  adversary config --config custom.json
 
 Exit codes:
   0   Workflow completed end-to-end (even if threshold findings remain)
@@ -186,6 +193,15 @@ async function main(): Promise<void> {
 
     try {
       await runCommand(runOptions);
+    } catch (e) {
+      process.stderr.write(`\nError: ${e instanceof Error ? e.message : String(e)}\n`);
+      process.exit(1);
+    }
+  } else if (command === "config") {
+    try {
+      await configCommand({
+        configFile: options["config"] ? (options["config"] as string) : undefined,
+      });
     } catch (e) {
       process.stderr.write(`\nError: ${e instanceof Error ? e.message : String(e)}\n`);
       process.exit(1);
