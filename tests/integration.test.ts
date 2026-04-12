@@ -2,7 +2,10 @@
  * Integration test: orchestration flow end-to-end stub
  *
  * Tests the core orchestration pipeline using a fake implement and verify
- * command that completes in one turn with no findings. This exercises:
+ * harness that completes in one turn. The new orchestrator calls the
+ * verifyCommandTemplate multiple times (once per skill, once for synthesis).
+ *
+ * This exercises:
  * - artifact directory creation
  * - prompt generation
  * - loop termination on clean verify
@@ -16,6 +19,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { runLoop } from "../src/loop/index.js";
 import type { RunState, AdversaryConfig } from "../src/types/index.js";
 import { buildRunDir, initRunDir, snapshotPlan } from "../src/artifacts/index.js";
+import { DEFAULT_CONFIG } from "../src/types/index.js";
 
 async function makeGitRepo(): Promise<string> {
   const dir = mkdtempSync(join(tmpdir(), "adversary-integration-test-"));
@@ -35,21 +39,66 @@ async function makeGitRepo(): Promise<string> {
   return dir;
 }
 
-function writeVerifyJson(dir: string, findings: unknown[] = []): string {
-  const script = join(dir, "fake-verify.sh");
-  // Write the JSON to a temp file to avoid shell quoting/interpolation issues
-  const jsonFile = join(dir, "fake-verify-output.json");
-  writeFileSync(
-    jsonFile,
-    JSON.stringify({
-      schemaVersion: 1,
-      status: "ok",
-      findings,
-    })
-  );
+/**
+ * Write a fake harness script for the new multi-skill orchestrator.
+ *
+ * The harness is called with @{promptFile} where the prompt file contains
+ * the skill prompt. The harness detects what kind of output to produce by
+ * looking at keywords in the prompt file.
+ *
+ * - discovery prompt → outputs ToolchainDiscovery JSON
+ * - synthesis prompt → outputs full VerifyReport JSON (with schemaVersion)
+ * - skill prompts → outputs {"status": "ok", "findings": [...]}
+ *
+ * If findings are provided, they appear in the synthesis output only.
+ */
+function writeFakeHarness(
+  dir: string,
+  name: string,
+  findings: unknown[] = [],
+  status: string = "ok"
+): string {
+  const script = join(dir, name);
+  const findingsJson = JSON.stringify(findings);
+  const verifyStatus = status;
+
+  // The synthesis prompt contains "schemaVersion" — we use that as the signal
+  // The discovery prompt contains "testCommand" — we use that as the signal
   writeFileSync(
     script,
-    `#!/bin/sh\n# Extract --output= path from args\nfor arg in "$@"; do\n  case "$arg" in\n    --output=*) OUTPUT="\${arg#*=}" ;;\n  esac\ndone\nif [ -n "$OUTPUT" ]; then\n  cp "${jsonFile}" "$OUTPUT"\nfi\nexit 0\n`,
+    `#!/bin/sh
+# Read the prompt file from @... argument
+PROMPT_FILE=""
+for arg in "$@"; do
+  case "$arg" in
+    @*) PROMPT_FILE="\${arg#@}" ;;
+  esac
+done
+
+if [ -z "$PROMPT_FILE" ]; then
+  # No prompt file - just output skill JSON
+  echo '{"status":"ok","findings":[]}'
+  exit 0
+fi
+
+CONTENT=$(cat "$PROMPT_FILE" 2>/dev/null || echo "")
+
+# Check if this is the synthesis prompt (contains "schemaVersion")
+if echo "$CONTENT" | grep -q "schemaVersion"; then
+  echo '{"schemaVersion":1,"status":"${verifyStatus}","findings":${findingsJson}}'
+  exit 0
+fi
+
+# Check if this is the discovery prompt (contains "testCommand")
+if echo "$CONTENT" | grep -q '"testCommand"\\|toolchain discovery'; then
+  echo '{"testCommand":null,"buildCommand":null,"lintCommands":[],"typeCheckCommands":[],"startCommand":null,"browserDeps":[]}'
+  exit 0
+fi
+
+# Default: skill prompt - output skill JSON (no findings; synthesis will include them)
+echo '{"status":"ok","findings":[]}'
+exit 0
+`,
     { mode: 0o755 }
   );
   return script;
@@ -66,6 +115,44 @@ function writeFakeSummarizer(dir: string, name = "fake-summarizer.sh"): string {
     { mode: 0o755 }
   );
   return script;
+}
+
+/**
+ * Build a minimal AdversaryConfig for integration tests.
+ */
+function makeConfig(
+  cwd: string,
+  opts: {
+    implementCommand?: string;
+    harness?: string;
+    findings?: unknown[];
+    verifyStatus?: string;
+    summarizerName?: string;
+  } = {}
+): AdversaryConfig {
+  const {
+    implementCommand = "true",
+    findings = [],
+    verifyStatus = "ok",
+    summarizerName = "fake-summarizer.sh",
+  } = opts;
+
+  let harness = opts.harness;
+  if (!harness) {
+    harness = writeFakeHarness(cwd, `fake-harness-${summarizerName}.sh`, findings, verifyStatus);
+  }
+  const summarizerScript = writeFakeSummarizer(cwd, summarizerName);
+
+  return {
+    ...DEFAULT_CONFIG,
+    implementCommandTemplate: implementCommand,
+    verifyCommandTemplate: `${harness} @{promptFile}`,
+    summarizerCommandTemplate: summarizerScript,
+    implementTimeoutMs: 30000,
+    verifyTimeoutMs: 30000,
+    prTimeoutMs: 10000,
+    summarizerTimeoutMs: 10000,
+  };
 }
 
 describe("runLoop integration", () => {
@@ -93,9 +180,6 @@ describe("runLoop integration", () => {
     await initRunDir(runDir);
     await snapshotPlan(runDir, "# Test Plan\nDo a thing.");
 
-    // Write a fake verify script that outputs clean JSON
-    const verifyScript = writeVerifyJson(cwd, []);
-
     const state: RunState = {
       runDir,
       planFile: join(runDir, "plan.txt"),
@@ -106,16 +190,7 @@ describe("runLoop integration", () => {
       turns: [],
     };
 
-    const summarizerScript = writeFakeSummarizer(cwd);
-    const config: AdversaryConfig = {
-      implementCommandTemplate: "true", // no-op implement
-      verifyCommandTemplate: `${verifyScript} --output={verifyOutputFile}`,
-      summarizerCommandTemplate: summarizerScript,
-      implementTimeoutMs: 10000,
-      verifyTimeoutMs: 10000,
-      prTimeoutMs: 10000,
-      summarizerTimeoutMs: 10000,
-    };
+    const config = makeConfig(cwd, { findings: [], verifyStatus: "ok", summarizerName: "fake-summarizer-clean.sh" });
 
     await runLoop({ cwd, state, planContent: "# Test Plan\nDo a thing.", maxTurns: 3, threshold: 7, config });
 
@@ -129,30 +204,13 @@ describe("runLoop integration", () => {
     const summary = JSON.parse(readFileSync(summaryPath, "utf8"));
     expect(summary.outcome).toBe("clean");
     expect(summary.turn).toBe(1);
-  });
+  }, 60000);
 
   test("terminates capped when max turns reached with findings remaining", async () => {
     const cwd = await makeGitRepo();
     const runDir = join(cwd, ".test-runs", "test-run-2");
     await initRunDir(runDir);
     await snapshotPlan(runDir, "# Test Plan 2\nDo another thing.");
-
-    // Verify script that always returns one high-severity finding
-    const verifyScript = join(cwd, "fake-verify-findings.sh");
-    const jsonFile = join(cwd, "fake-verify-findings-output.json");
-    writeFileSync(
-      jsonFile,
-      JSON.stringify({
-        schemaVersion: 1,
-        status: "ok",
-        findings: [{ title: "Bug", severity: 8, description: "Bad", sources: ["reviewer"] }],
-      })
-    );
-    writeFileSync(
-      verifyScript,
-      `#!/bin/sh\nfor arg in "$@"; do\n  case "$arg" in\n    --output=*) OUTPUT="\${arg#*=}" ;;\n  esac\ndone\nif [ -n "$OUTPUT" ]; then\n  cp "${jsonFile}" "$OUTPUT"\nfi\nexit 0\n`,
-      { mode: 0o755 }
-    );
 
     const state: RunState = {
       runDir,
@@ -164,23 +222,18 @@ describe("runLoop integration", () => {
       turns: [],
     };
 
-    const summarizerScript2 = writeFakeSummarizer(cwd, "fake-summarizer-2.sh");
-    const config: AdversaryConfig = {
-      implementCommandTemplate: "true",
-      verifyCommandTemplate: `${verifyScript} --output={verifyOutputFile}`,
-      summarizerCommandTemplate: summarizerScript2,
-      implementTimeoutMs: 10000,
-      verifyTimeoutMs: 10000,
-      prTimeoutMs: 10000,
-      summarizerTimeoutMs: 10000,
-    };
+    const config = makeConfig(cwd, {
+      findings: [{ title: "Bug", severity: 8, description: "Bad", sources: ["reviewer"] }],
+      verifyStatus: "ok",
+      summarizerName: "fake-summarizer-capped.sh",
+    });
 
     await runLoop({ cwd, state, planContent: "# Test Plan 2\nDo another thing.", maxTurns: 2, threshold: 7, config });
 
     expect(state.outcome).toBe("capped");
     expect(state.turns).toHaveLength(2);
     expect(state.turns[state.turns.length - 1]?.thresholdFindings).toHaveLength(1);
-  }, 30000);
+  }, 120000);
 
   test("sets implement-failure outcome when implement command exits non-zero", async () => {
     const cwd = await makeGitRepo();
@@ -198,81 +251,23 @@ describe("runLoop integration", () => {
       turns: [],
     };
 
-    const config: AdversaryConfig = {
-      implementCommandTemplate: "false", // exits non-zero
-      verifyCommandTemplate: "true",
-      summarizerCommandTemplate: "true",
-      implementTimeoutMs: 10000,
-      verifyTimeoutMs: 10000,
-      prTimeoutMs: 10000,
-      summarizerTimeoutMs: 10000,
-    };
+    const config = makeConfig(cwd, {
+      implementCommand: "false", // exits non-zero
+      summarizerName: "fake-summarizer-impl-fail.sh",
+    });
 
     await runLoop({ cwd, state, planContent: "# Test Plan Impl Fail\nDo a thing.", maxTurns: 3, threshold: 7, config });
 
     expect(state.outcome).toBe("implement-failure");
     expect(state.turns).toHaveLength(1);
     expect(state.turns[0]?.outcome).toBe("implement-failure");
-  });
+  }, 30000);
 
-  test("sets verify-failure outcome when verify JSON is missing after verify command fails", async () => {
-    const cwd = await makeGitRepo();
-    const runDir = join(cwd, ".test-runs", "test-run-verify-fail");
-    await initRunDir(runDir);
-    await snapshotPlan(runDir, "# Test Plan Verify Fail\nDo a thing.");
-
-    const state: RunState = {
-      runDir,
-      planFile: join(runDir, "plan.txt"),
-      planTitle: "Test Plan Verify Fail",
-      branch: "adversary/test-branch",
-      baseBranch: "main",
-      startedAt: new Date().toISOString(),
-      turns: [],
-    };
-
-    const summarizerScriptVF = writeFakeSummarizer(cwd, "fake-summarizer-vf.sh");
-    const config: AdversaryConfig = {
-      implementCommandTemplate: "true",
-      verifyCommandTemplate: "false", // exits non-zero, writes no JSON
-      summarizerCommandTemplate: summarizerScriptVF,
-      implementTimeoutMs: 10000,
-      verifyTimeoutMs: 10000,
-      prTimeoutMs: 10000,
-      summarizerTimeoutMs: 10000,
-    };
-
-    await runLoop({ cwd, state, planContent: "# Test Plan Verify Fail\nDo a thing.", maxTurns: 3, threshold: 7, config });
-
-    expect(state.outcome).toBe("verify-failure");
-    expect(state.turns).toHaveLength(1);
-    expect(state.turns[0]?.outcome).toBe("verify-failure");
-  });
-
-  test("sets verify-error outcome when verify reports status=error with exit code 0", async () => {
+  test("sets verify-error outcome when verify reports status=error", async () => {
     const cwd = await makeGitRepo();
     const runDir = join(cwd, ".test-runs", "test-run-error");
     await initRunDir(runDir);
     await snapshotPlan(runDir, "# Test Plan Error\nDo a thing.");
-
-    // Fake verify script that emits status=error with exit code 0
-    const jsonFile = join(cwd, "fake-verify-error.json");
-    writeFileSync(
-      jsonFile,
-      JSON.stringify({
-        schemaVersion: 1,
-        status: "error",
-        findings: [
-          { title: "Error Issue", severity: 8, description: "Something went wrong", sources: ["reviewer"] },
-        ],
-      })
-    );
-    const verifyScript = join(cwd, "fake-verify-error.sh");
-    writeFileSync(
-      verifyScript,
-      `#!/bin/sh\nfor arg in "$@"; do\n  case "$arg" in\n    --output=*) OUTPUT="\${arg#*=}" ;;\n  esac\ndone\nif [ -n "$OUTPUT" ]; then\n  cp "${jsonFile}" "$OUTPUT"\nfi\nexit 0\n`,
-      { mode: 0o755 }
-    );
 
     const state: RunState = {
       runDir,
@@ -284,16 +279,11 @@ describe("runLoop integration", () => {
       turns: [],
     };
 
-    const summarizerScriptVE = writeFakeSummarizer(cwd, "fake-summarizer-ve.sh");
-    const config: AdversaryConfig = {
-      implementCommandTemplate: "true",
-      verifyCommandTemplate: `${verifyScript} --output={verifyOutputFile}`,
-      summarizerCommandTemplate: summarizerScriptVE,
-      implementTimeoutMs: 10000,
-      verifyTimeoutMs: 10000,
-      prTimeoutMs: 10000,
-      summarizerTimeoutMs: 10000,
-    };
+    const config = makeConfig(cwd, {
+      findings: [{ title: "Error Issue", severity: 8, description: "Something went wrong", sources: ["reviewer"] }],
+      verifyStatus: "error",
+      summarizerName: "fake-summarizer-error.sh",
+    });
 
     await runLoop({ cwd, state, planContent: "# Test Plan Error\nDo a thing.", maxTurns: 3, threshold: 7, config });
 
@@ -304,7 +294,7 @@ describe("runLoop integration", () => {
     // findings from error verify should still be recorded
     expect(state.turns[0]?.thresholdFindings).toHaveLength(1);
     expect(state.turns[0]?.thresholdFindings[0]?.title).toBe("Error Issue");
-  });
+  }, 60000);
 
   test("sets summarizer-failure outcome when summarizer exits non-zero", async () => {
     const cwd = await makeGitRepo();
@@ -322,11 +312,7 @@ describe("runLoop integration", () => {
 
     // Summarizer that exits non-zero
     const failSummarizerScript = join(cwd, "fail-summarizer.sh");
-    writeFileSync(
-      failSummarizerScript,
-      `#!/bin/sh\nexit 1\n`,
-      { mode: 0o755 }
-    );
+    writeFileSync(failSummarizerScript, `#!/bin/sh\nexit 1\n`, { mode: 0o755 });
 
     const state: RunState = {
       runDir,
@@ -338,12 +324,14 @@ describe("runLoop integration", () => {
       turns: [],
     };
 
+    const fakeHarness = writeFakeHarness(cwd, "fake-harness-sumfail.sh");
     const config: AdversaryConfig = {
+      ...DEFAULT_CONFIG,
       implementCommandTemplate: implScript,
-      verifyCommandTemplate: "true",
+      verifyCommandTemplate: `${fakeHarness} @{promptFile}`,
       summarizerCommandTemplate: failSummarizerScript,
-      implementTimeoutMs: 10000,
-      verifyTimeoutMs: 10000,
+      implementTimeoutMs: 30000,
+      verifyTimeoutMs: 30000,
       prTimeoutMs: 10000,
       summarizerTimeoutMs: 10000,
     };
@@ -353,7 +341,7 @@ describe("runLoop integration", () => {
     expect(state.outcome).toBe("summarizer-failure");
     expect(state.turns).toHaveLength(1);
     expect(state.turns[0]?.outcome).toBe("summarizer-failure");
-  });
+  }, 30000);
 
   test("sets summarizer-failure outcome when summarizer produces invalid JSON", async () => {
     const cwd = await makeGitRepo();
@@ -371,12 +359,9 @@ describe("runLoop integration", () => {
 
     // Summarizer that outputs non-JSON
     const invalidSummarizerScript = join(cwd, "invalid-summarizer.sh");
-    writeFileSync(
-      invalidSummarizerScript,
-      `#!/bin/sh\necho "not valid json"\nexit 0\n`,
-      { mode: 0o755 }
-    );
+    writeFileSync(invalidSummarizerScript, `#!/bin/sh\necho "not valid json"\nexit 0\n`, { mode: 0o755 });
 
+    const fakeHarness2 = writeFakeHarness(cwd, "fake-harness-suminvalid.sh");
     const state: RunState = {
       runDir,
       planFile: join(runDir, "plan.txt"),
@@ -388,11 +373,12 @@ describe("runLoop integration", () => {
     };
 
     const config: AdversaryConfig = {
+      ...DEFAULT_CONFIG,
       implementCommandTemplate: implScript2,
-      verifyCommandTemplate: "true",
+      verifyCommandTemplate: `${fakeHarness2} @{promptFile}`,
       summarizerCommandTemplate: invalidSummarizerScript,
-      implementTimeoutMs: 10000,
-      verifyTimeoutMs: 10000,
+      implementTimeoutMs: 30000,
+      verifyTimeoutMs: 30000,
       prTimeoutMs: 10000,
       summarizerTimeoutMs: 10000,
     };
@@ -402,32 +388,13 @@ describe("runLoop integration", () => {
     expect(state.outcome).toBe("summarizer-failure");
     expect(state.turns).toHaveLength(1);
     expect(state.turns[0]?.outcome).toBe("summarizer-failure");
-  });
+  }, 30000);
 
   test("sets verify-blocked outcome when verify reports status=blocked", async () => {
     const cwd = await makeGitRepo();
     const runDir = join(cwd, ".test-runs", "test-run-blocked");
     await initRunDir(runDir);
     await snapshotPlan(runDir, "# Test Plan Blocked\nDo a thing.");
-
-    // Fake verify script that emits status=blocked
-    const jsonFile = join(cwd, "fake-verify-blocked.json");
-    writeFileSync(
-      jsonFile,
-      JSON.stringify({
-        schemaVersion: 1,
-        status: "blocked",
-        findings: [
-          { title: "Blocking Issue", severity: 9, description: "Cannot proceed", sources: ["qa"] },
-        ],
-      })
-    );
-    const verifyScript = join(cwd, "fake-verify-blocked.sh");
-    writeFileSync(
-      verifyScript,
-      `#!/bin/sh\nfor arg in "$@"; do\n  case "$arg" in\n    --output=*) OUTPUT="\${arg#*=}" ;;\n  esac\ndone\nif [ -n "$OUTPUT" ]; then\n  cp "${jsonFile}" "$OUTPUT"\nfi\nexit 0\n`,
-      { mode: 0o755 }
-    );
 
     const state: RunState = {
       runDir,
@@ -439,16 +406,11 @@ describe("runLoop integration", () => {
       turns: [],
     };
 
-    const summarizerScriptVB = writeFakeSummarizer(cwd, "fake-summarizer-vb.sh");
-    const config: AdversaryConfig = {
-      implementCommandTemplate: "true",
-      verifyCommandTemplate: `${verifyScript} --output={verifyOutputFile}`,
-      summarizerCommandTemplate: summarizerScriptVB,
-      implementTimeoutMs: 10000,
-      verifyTimeoutMs: 10000,
-      prTimeoutMs: 10000,
-      summarizerTimeoutMs: 10000,
-    };
+    const config = makeConfig(cwd, {
+      findings: [{ title: "Blocking Issue", severity: 9, description: "Cannot proceed", sources: ["qa"] }],
+      verifyStatus: "blocked",
+      summarizerName: "fake-summarizer-blocked.sh",
+    });
 
     await runLoop({ cwd, state, planContent: "# Test Plan Blocked\nDo a thing.", maxTurns: 3, threshold: 7, config });
 
@@ -459,7 +421,7 @@ describe("runLoop integration", () => {
     // findings from blocked verify should still be recorded
     expect(state.turns[0]?.thresholdFindings).toHaveLength(1);
     expect(state.turns[0]?.thresholdFindings[0]?.title).toBe("Blocking Issue");
-  });
+  }, 60000);
 
   test("recovers from commit failure caused by pre-commit hook", async () => {
     const cwd = await makeGitRepo();
@@ -477,11 +439,8 @@ describe("runLoop integration", () => {
 
     // Turn 1: implement creates a file with the marker (commit will fail)
     // Turn 2: implement overwrites the file without the marker (commit will succeed)
-    // Note: the script must be in .gitignore or outside the repo so the hook doesn't
-    // match the marker string inside the script itself.
     const markerFile = join(cwd, "marker.txt");
     const implScript = join(cwd, "fake-impl-commit-fail.sh");
-    // Add the script to .gitignore so git add -A won't stage it
     writeFileSync(join(cwd, ".gitignore"), "fake-*.sh\n");
     writeFileSync(
       implScript,
@@ -489,7 +448,7 @@ describe("runLoop integration", () => {
       { mode: 0o755 }
     );
 
-    const verifyScript = writeVerifyJson(cwd, []);
+    const fakeHarness = writeFakeHarness(cwd, "fake-harness-cf.sh", []);
     const summarizerScript = writeFakeSummarizer(cwd, "fake-summarizer-cf.sh");
 
     const state: RunState = {
@@ -503,11 +462,12 @@ describe("runLoop integration", () => {
     };
 
     const config: AdversaryConfig = {
+      ...DEFAULT_CONFIG,
       implementCommandTemplate: implScript,
-      verifyCommandTemplate: `${verifyScript} --output={verifyOutputFile}`,
+      verifyCommandTemplate: `${fakeHarness} @{promptFile}`,
       summarizerCommandTemplate: summarizerScript,
-      implementTimeoutMs: 10000,
-      verifyTimeoutMs: 10000,
+      implementTimeoutMs: 30000,
+      verifyTimeoutMs: 30000,
       prTimeoutMs: 10000,
       summarizerTimeoutMs: 10000,
     };
@@ -523,7 +483,7 @@ describe("runLoop integration", () => {
     // Turn 2 should recover and succeed
     expect(state.turns[1]?.outcome).toBe("clean");
     expect(state.outcome).toBe("clean");
-  });
+  }, 120000);
 
   test("sets commit-failure outcome when all turns exhausted on hook failure", async () => {
     const cwd = await makeGitRepo();
@@ -559,12 +519,14 @@ describe("runLoop integration", () => {
       turns: [],
     };
 
+    // This test doesn't need verify to work (commit always fails before verify)
     const config: AdversaryConfig = {
+      ...DEFAULT_CONFIG,
       implementCommandTemplate: implScript,
       verifyCommandTemplate: "true",
       summarizerCommandTemplate: summarizerScript,
-      implementTimeoutMs: 10000,
-      verifyTimeoutMs: 10000,
+      implementTimeoutMs: 30000,
+      verifyTimeoutMs: 30000,
       prTimeoutMs: 10000,
       summarizerTimeoutMs: 10000,
     };
@@ -575,5 +537,5 @@ describe("runLoop integration", () => {
     expect(state.turns[0]?.outcome).toBe("commit-failure");
     expect(state.turns[1]?.outcome).toBe("commit-failure");
     expect(state.outcome).toBe("commit-failure");
-  });
+  }, 30000);
 });

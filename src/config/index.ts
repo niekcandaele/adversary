@@ -22,6 +22,67 @@ function parseConfigLayer(raw: Record<string, unknown>): Partial<AdversaryConfig
   if (typeof raw.prTimeoutMs === "number") layer.prTimeoutMs = raw.prTimeoutMs;
   if (typeof raw.summarizerTimeoutMs === "number")
     layer.summarizerTimeoutMs = raw.summarizerTimeoutMs;
+
+  // browserAutomation
+  if (raw.browserAutomation !== undefined) {
+    if (!["warn", "require", "skip"].includes(raw.browserAutomation as string)) {
+      throw new Error(
+        `Invalid browserAutomation value: "${raw.browserAutomation}". Must be "warn", "require", or "skip".`
+      );
+    }
+    layer.browserAutomation = raw.browserAutomation as import("../types/index.js").BrowserAutomationMode;
+  }
+
+  // customVerificationSteps
+  if (raw.customVerificationSteps !== undefined) {
+    if (!Array.isArray(raw.customVerificationSteps)) {
+      throw new Error("customVerificationSteps must be an array");
+    }
+    const steps = raw.customVerificationSteps as unknown[];
+    layer.customVerificationSteps = steps.map((step, i) => {
+      const s = step as Record<string, unknown>;
+      if (typeof s.name !== "string") {
+        throw new Error(`customVerificationSteps[${i}].name must be a string`);
+      }
+      if (typeof s.commandTemplate !== "string") {
+        throw new Error(`customVerificationSteps[${i}].commandTemplate must be a string`);
+      }
+      if (s.phase !== "parallel" && s.phase !== "sequential") {
+        throw new Error(
+          `customVerificationSteps[${i}].phase must be "parallel" or "sequential"`
+        );
+      }
+      return {
+        name: s.name,
+        commandTemplate: s.commandTemplate,
+        phase: s.phase as "parallel" | "sequential",
+        timeoutMs: typeof s.timeoutMs === "number" ? s.timeoutMs : undefined,
+      };
+    });
+  }
+
+  // skillOverrides
+  if (raw.skillOverrides !== undefined) {
+    if (typeof raw.skillOverrides !== "object" || raw.skillOverrides === null || Array.isArray(raw.skillOverrides)) {
+      throw new Error("skillOverrides must be an object");
+    }
+    const overrides = raw.skillOverrides as Record<string, unknown>;
+    const parsed: Record<string, import("../types/index.js").SkillOverride> = {};
+    for (const [key, val] of Object.entries(overrides)) {
+      const v = val as Record<string, unknown>;
+      if (v.extraContext !== undefined && v.promptFile !== undefined) {
+        throw new Error(
+          `skillOverrides.${key}: extraContext and promptFile are mutually exclusive`
+        );
+      }
+      parsed[key] = {
+        extraContext: typeof v.extraContext === "string" ? v.extraContext : undefined,
+        promptFile: typeof v.promptFile === "string" ? v.promptFile : undefined,
+      };
+    }
+    layer.skillOverrides = parsed;
+  }
+
   return layer;
 }
 
@@ -53,6 +114,10 @@ export async function loadConfig(cwd: string, overridePath?: string): Promise<Ad
   const projectPath = overridePath ?? join(gitRoot, CONFIG_FILENAME);
   const projectLayer = await loadLayer(projectPath);
 
+  // Note: this is a shallow merge. Array/object fields (customVerificationSteps,
+  // skillOverrides) are replaced entirely by whichever layer sets them last —
+  // they are NOT deep-merged. Set the full array/object in the most specific
+  // config layer you want to take effect.
   return {
     ...DEFAULT_CONFIG,
     ...globalLayer,

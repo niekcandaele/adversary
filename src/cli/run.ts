@@ -41,7 +41,7 @@ export async function runCommand(options: RunOptions): Promise<void> {
 
   // 2. Preflight
   process.stdout.write(`\n[Preflight] Running checks...\n`);
-  const preflight = await runPreflight(cwd, planFile, spawnEnv);
+  const preflight = await runPreflight(cwd, planFile, config, spawnEnv);
 
   process.stdout.write(`  Platform: ${preflight.platform}\n`);
   process.stdout.write(`  PR CLI: ${preflight.prCli}\n`);

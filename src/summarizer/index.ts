@@ -3,76 +3,10 @@ import type { AdversaryConfig, SummarizerOutput, PrSummaryOutput } from "../type
 import { runStep } from "../runner/index.js";
 import { generateCommitMessagePrompt, generatePrBodyPrompt } from "../prompts/index.js";
 import { interpolate } from "../utils/slugify.js";
-
-/**
- * Extract the first valid JSON object found in a string.
- * Handles cases where the agent outputs preamble text before/after the JSON,
- * including preamble that contains literal '{' characters.
- * Also handles escaped quotes inside JSON strings.
- */
-export function extractJson(stdout: string): unknown {
-  // Try each '{' position in the string until we find one that parses as valid JSON.
-  let searchFrom = 0;
-
-  while (true) {
-    const start = stdout.indexOf("{", searchFrom);
-    if (start === -1) {
-      throw new Error("No JSON object found in output");
-    }
-
-    // Walk from 'start', balancing braces while respecting strings and escape sequences.
-    let depth = 0;
-    let inString = false;
-    let escape = false;
-
-    let foundClose = false;
-    for (let i = start; i < stdout.length; i++) {
-      const ch = stdout[i];
-
-      if (escape) {
-        // Any character after a backslash is consumed (the escape target), regardless of type.
-        escape = false;
-        continue;
-      }
-
-      if (inString) {
-        if (ch === "\\") {
-          // Next character is escaped — set flag so we skip it in the next iteration.
-          escape = true;
-        } else if (ch === '"') {
-          inString = false;
-        }
-        continue;
-      }
-
-      // Outside a string
-      if (ch === '"') {
-        inString = true;
-      } else if (ch === "{") {
-        depth++;
-      } else if (ch === "}") {
-        depth--;
-        if (depth === 0) {
-          const jsonStr = stdout.slice(start, i + 1);
-          try {
-            return JSON.parse(jsonStr);
-          } catch {
-            // This candidate didn't parse — try the next '{' position.
-            searchFrom = start + 1;
-            foundClose = true;
-            break;
-          }
-        }
-      }
-    }
-
-    // If we exited the loop without closing the brace (unbalanced or parse failed),
-    // advance past this '{' and try the next candidate.
-    if (!foundClose) {
-      searchFrom = start + 1;
-    }
-  }
-}
+// Re-export for backward compatibility — tests and callers that import
+// extractJson from here still work.
+export { extractJson } from "../utils/json.js";
+import { extractJson } from "../utils/json.js";
 
 export async function generateCommitMessage(options: {
   config: AdversaryConfig;

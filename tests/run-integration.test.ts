@@ -19,8 +19,6 @@ import { PrError } from "../src/pr/index.js";
 
 /**
  * Create a minimal git repo with initial commit and a local bare remote.
- * This avoids needing to fake git push — the push goes to a local bare repo.
- * Returns the repo dir.
  */
 async function makeGitRepo(): Promise<string> {
   const dir = mkdtempSync(join(tmpdir(), "adversary-run-int-"));
@@ -31,8 +29,6 @@ async function makeGitRepo(): Promise<string> {
   await run("git", "init", "-b", "main");
   await run("git", "config", "user.email", "test@test.com");
   await run("git", "config", "user.name", "Test");
-  // Artifacts are now stored in XDG_STATE_HOME, not the repo. A minimal .gitignore is
-  // still needed to keep the working tree clean for preflight checks.
   const proc = Bun.spawn(
     ["sh", "-c", "echo 'fake-*.sh' > .gitignore && echo 'init' > README.md && git add -A && git commit -m init"],
     { cwd: dir, stdout: "pipe", stderr: "pipe" }
@@ -71,23 +67,68 @@ function writePlan(tmpDir: string, title: string): string {
 }
 
 /**
+ * Write a fake harness script for the multi-skill orchestrator.
+ * The harness is called with @{promptFile} and outputs skill or synthesis JSON.
+ *
+ * - discovery prompt → outputs ToolchainDiscovery JSON
+ * - synthesis prompt → outputs full VerifyReport JSON
+ * - skill prompts → outputs {"status": "ok", "findings": [...]}
+ */
+function writeFakeVerifyHarness(
+  dir: string,
+  name: string,
+  opts: { findings?: unknown[]; status?: string }
+): string {
+  const { findings = [], status = "ok" } = opts;
+  const findingsJson = JSON.stringify(findings);
+  const verifyStatus = status;
+
+  return writeScript(
+    dir,
+    name,
+    `#!/bin/sh
+PROMPT_FILE=""
+for arg in "$@"; do
+  case "$arg" in
+    @*) PROMPT_FILE="\${arg#@}" ;;
+  esac
+done
+
+if [ -z "$PROMPT_FILE" ]; then
+  echo '{"status":"ok","findings":[]}'
+  exit 0
+fi
+
+CONTENT=$(cat "$PROMPT_FILE" 2>/dev/null || echo "")
+
+# Synthesis prompt: contains "schemaVersion"
+if echo "$CONTENT" | grep -q "schemaVersion"; then
+  echo '{"schemaVersion":1,"status":"${verifyStatus}","findings":${findingsJson}}'
+  exit 0
+fi
+
+# Discovery prompt: contains "testCommand" or "toolchain discovery"
+if echo "$CONTENT" | grep -q 'testCommand\\|toolchain discovery'; then
+  echo '{"testCommand":null,"buildCommand":null,"lintCommands":[],"typeCheckCommands":[],"startCommand":null,"browserDeps":[]}'
+  exit 0
+fi
+
+# Default skill response (no findings; synthesis will include them)
+echo '{"status":"ok","findings":[]}'
+exit 0
+`
+  );
+}
+
+/**
  * Build a fake bin directory with all required scripts.
- *
- * The fake 'gh' script distinguishes 'auth status' from 'pr create':
- * - 'auth status' always exits 0 (preflight passes)
- * - 'pr create' exits with prCreateExitCode and optionally logs args
- *
- * The fake 'git' delegates real git commands but intercepts 'push' to
- * succeed silently (no real remote needed).
- *
- * Returns: { binDir, verifyScriptPath, prCreateArgsLog, summarizerScriptPath }
  */
 function makeFakeBin(tmpDir: string, opts: {
   implementExitCode?: number;
   verifyStatus?: "ok" | "blocked" | "error";
   prCreateExitCode?: number;
   prCreateOutput?: string;
-}): { binDir: string; verifyScriptPath: string; prCreateArgsLog: string; summarizerScriptPath: string } {
+}): { binDir: string; verifyHarnessPath: string; prCreateArgsLog: string; summarizerScriptPath: string } {
   const {
     implementExitCode = 0,
     verifyStatus = "ok",
@@ -98,50 +139,42 @@ function makeFakeBin(tmpDir: string, opts: {
   const binDir = join(tmpDir, "bin");
   mkdirSync(binDir, { recursive: true });
 
-  // Log file for 'gh pr create' args
   const prCreateArgsLog = join(tmpDir, "pr-create-args.log");
 
-  // Fake 'pi' — exits 0 for --help (preflight check), and with implementExitCode otherwise.
-  writeScript(binDir, "pi",
-    `#!/bin/sh\nif [ "$1" = "--help" ]; then\n  exit 0\nfi\nexit ${implementExitCode}\n`
+  // Fake implement harness — exits 0 for implement (no @promptFile check needed)
+  writeScript(binDir, "fake-impl.sh",
+    `#!/bin/sh\nexit ${implementExitCode}\n`
   );
 
-  // Fake summarizer script — outputs valid PR summary JSON
+  // Fake summarizer script — outputs valid commit message JSON
   const summarizerScriptPath = writeScript(binDir, "fake-summarizer.sh",
-    `#!/bin/sh\necho '{ "title": "Implement plan changes", "summary": "- Changes made", "reviewerGuide": "Review src/ changes", "testPlan": "Run bun test", "issueNumber": null }'\nexit 0\n`
-  );
-
-  // Fake verify JSON
-  const verifyJsonPath = join(tmpDir, "verify-output.json");
-  const findings = verifyStatus === "blocked"
-    ? [{ title: "Blocked", severity: 9, description: "Blocked", sources: ["qa"] }]
-    : [];
-  writeFileSync(verifyJsonPath, JSON.stringify({
-    schemaVersion: 1,
-    status: verifyStatus,
-    findings,
-  }));
-
-  // Fake verify script
-  const verifyScriptPath = join(binDir, "verify-script.sh");
-  writeScript(binDir, "verify-script.sh",
     `#!/bin/sh
+PROMPT_FILE=""
 for arg in "$@"; do
   case "$arg" in
-    --output=*) OUTPUT="\${arg#*=}" ;;
+    @*) PROMPT_FILE="\${arg#@}" ;;
   esac
 done
-if [ -n "$OUTPUT" ]; then
-  cp "${verifyJsonPath}" "$OUTPUT"
-fi
+echo '{ "title": "Implement plan changes", "summary": "- Changes made", "reviewerGuide": "Review src/ changes", "testPlan": "Run bun test", "issueNumber": null, "commitMessage": "feat: implement plan changes" }'
 exit 0
 `
   );
 
+  // Fake verify harness for multi-skill orchestrator
+  const findings = verifyStatus === "blocked"
+    ? [{ title: "Blocked", severity: 9, description: "Blocked", sources: ["qa"] }]
+    : verifyStatus === "error"
+    ? [{ title: "Error", severity: 8, description: "Error occurred", sources: ["tester"] }]
+    : [];
+
+  const verifyHarnessPath = writeFakeVerifyHarness(tmpDir, "fake-verify-harness.sh", {
+    findings,
+    status: verifyStatus,
+  });
+
   // Fake 'gh' — handles both 'auth status' (preflight) and 'pr create'
   writeScript(binDir, "gh",
     `#!/bin/sh
-# Detect subcommand: 'auth status' vs 'pr create'
 if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
   exit 0
 fi
@@ -150,7 +183,6 @@ if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
   echo "${prCreateOutput}"
   exit ${prCreateExitCode}
 fi
-# Any other gh command: succeed silently
 exit 0
 `
   );
@@ -160,27 +192,30 @@ exit 0
     `#!/bin/sh\necho "glab not expected" >&2\nexit 1\n`
   );
 
-  // Note: we do NOT fake 'git' — real git push goes to a local bare repo (set up as origin).
-  // This avoids Bun's PATH caching issue where Bun resolves 'git' at import time.
-
-  return { binDir, verifyScriptPath, prCreateArgsLog, summarizerScriptPath };
+  return { binDir, verifyHarnessPath, prCreateArgsLog, summarizerScriptPath };
 }
 
 /**
- * Write a fake config file to a temp dir OUTSIDE the repo (so it doesn't
- * create untracked files in the working tree).
+ * Write a fake config file to a temp dir OUTSIDE the repo.
  */
-function writeFakeConfig(tmpDir: string, binDir: string, verifyScriptPath: string, summarizerScriptPath: string): string {
+function writeFakeConfig(
+  tmpDir: string,
+  opts: {
+    implementCommandTemplate: string;
+    verifyCommandTemplate: string;
+    summarizerCommandTemplate: string;
+  }
+): string {
   const configPath = join(tmpDir, ".adversary.json");
   const config = {
     baseBranch: "main",
-    implementCommandTemplate: `${join(binDir, "pi")} -p {promptFile}`,
-    verifyCommandTemplate: `${verifyScriptPath} --output={verifyOutputFile}`,
-    summarizerCommandTemplate: summarizerScriptPath,
-    implementTimeoutMs: 15000,
-    verifyTimeoutMs: 15000,
-    prTimeoutMs: 15000,
-    summarizerTimeoutMs: 15000,
+    implementCommandTemplate: opts.implementCommandTemplate,
+    verifyCommandTemplate: opts.verifyCommandTemplate,
+    summarizerCommandTemplate: opts.summarizerCommandTemplate,
+    implementTimeoutMs: 30000,
+    verifyTimeoutMs: 30000,
+    prTimeoutMs: 30000,
+    summarizerTimeoutMs: 30000,
   };
   writeFileSync(configPath, JSON.stringify(config));
   return configPath;
@@ -188,10 +223,6 @@ function writeFakeConfig(tmpDir: string, binDir: string, verifyScriptPath: strin
 
 /**
  * Run runCommand with a fake PATH (via options.env) and explicit cwd (via options.cwd).
- *
- * This avoids mutating process.env.PATH and calling process.chdir(), both of which
- * are global process state mutations that are unsafe for parallel test execution.
- * Instead, we pass the env and cwd directly to runCommand so each test is isolated.
  */
 async function runWithFakePath(
   repoDir: string,
@@ -250,20 +281,22 @@ describe("runCommand integration", () => {
   test("(a) implement-failure outcome skips push and PR creation", async () => {
     const repoDir = await makeGitRepo();
     const tmpBinDir = mkdtempSync(join(tmpdir(), "adversary-run-fakebin-"));
-    const { binDir, verifyScriptPath, prCreateArgsLog, summarizerScriptPath } = makeFakeBin(tmpBinDir, {
+    const { binDir, verifyHarnessPath, prCreateArgsLog, summarizerScriptPath } = makeFakeBin(tmpBinDir, {
       implementExitCode: 1, // implement fails → implement-failure
       verifyStatus: "ok",
       prCreateExitCode: 0,
     });
 
-    // Plan and config go into tmpBinDir (outside the repo) to keep working tree clean
+    const implScript = writeScript(tmpBinDir, "fake-impl-fail.sh", `#!/bin/sh\nexit 1\n`);
     const planPath = writePlan(tmpBinDir, "Test Impl Failure Skips PR");
-    const configPath = writeFakeConfig(tmpBinDir, binDir, verifyScriptPath, summarizerScriptPath);
+    const configPath = writeFakeConfig(tmpBinDir, {
+      implementCommandTemplate: `${implScript} @{promptFile}`,
+      verifyCommandTemplate: `${verifyHarnessPath} @{promptFile}`,
+      summarizerCommandTemplate: `${summarizerScriptPath} @{promptFile}`,
+    });
 
-    // runCommand should complete without throwing (failure outcome = exit 0)
     await runWithFakePath(repoDir, binDir, planPath, configPath);
 
-    // 'gh pr create' must NOT have been called
     const argsFile = Bun.file(prCreateArgsLog);
     expect(await argsFile.exists()).toBe(false);
   }, 60000);
@@ -271,98 +304,91 @@ describe("runCommand integration", () => {
   test("(a) verify-blocked outcome skips push and PR creation", async () => {
     const repoDir = await makeGitRepo();
     const tmpBinDir = mkdtempSync(join(tmpdir(), "adversary-run-fakebin-blocked-"));
-    const { binDir, verifyScriptPath, prCreateArgsLog, summarizerScriptPath } = makeFakeBin(tmpBinDir, {
+    const { binDir, verifyHarnessPath, prCreateArgsLog, summarizerScriptPath } = makeFakeBin(tmpBinDir, {
       implementExitCode: 0,
       verifyStatus: "blocked",
       prCreateExitCode: 0,
     });
 
+    const implScript = writeScript(tmpBinDir, "fake-impl-ok.sh", `#!/bin/sh\nexit 0\n`);
     const planPath = writePlan(tmpBinDir, "Test Blocked Skips PR");
-    const configPath = writeFakeConfig(tmpBinDir, binDir, verifyScriptPath, summarizerScriptPath);
+    const configPath = writeFakeConfig(tmpBinDir, {
+      implementCommandTemplate: `${implScript} @{promptFile}`,
+      verifyCommandTemplate: `${verifyHarnessPath} @{promptFile}`,
+      summarizerCommandTemplate: `${summarizerScriptPath} @{promptFile}`,
+    });
 
     await runWithFakePath(repoDir, binDir, planPath, configPath);
 
-    // 'gh pr create' must NOT have been called
     const argsFile = Bun.file(prCreateArgsLog);
     expect(await argsFile.exists()).toBe(false);
-  }, 60000);
+  }, 120000);
 
   test("(a) verify-error outcome skips push and PR creation", async () => {
     const repoDir = await makeGitRepo();
     const tmpBinDir = mkdtempSync(join(tmpdir(), "adversary-run-fakebin-verifyerror-"));
-    const { binDir, verifyScriptPath, prCreateArgsLog, summarizerScriptPath } = makeFakeBin(tmpBinDir, {
+    const { binDir, verifyHarnessPath, prCreateArgsLog, summarizerScriptPath } = makeFakeBin(tmpBinDir, {
       implementExitCode: 0,
       verifyStatus: "error",
       prCreateExitCode: 0,
     });
 
+    const implScript = writeScript(tmpBinDir, "fake-impl-ok.sh", `#!/bin/sh\nexit 0\n`);
     const planPath = writePlan(tmpBinDir, "Test Verify Error Skips PR");
-    const configPath = writeFakeConfig(tmpBinDir, binDir, verifyScriptPath, summarizerScriptPath);
+    const configPath = writeFakeConfig(tmpBinDir, {
+      implementCommandTemplate: `${implScript} @{promptFile}`,
+      verifyCommandTemplate: `${verifyHarnessPath} @{promptFile}`,
+      summarizerCommandTemplate: `${summarizerScriptPath} @{promptFile}`,
+    });
 
     await runWithFakePath(repoDir, binDir, planPath, configPath);
 
-    // 'gh pr create' must NOT have been called
     const argsFile = Bun.file(prCreateArgsLog);
     expect(await argsFile.exists()).toBe(false);
-  }, 60000);
+  }, 120000);
 
   test("(b) PrError from createPr propagates out of runCommand", async () => {
     const repoDir = await makeGitRepo();
     const tmpBinDir = mkdtempSync(join(tmpdir(), "adversary-run-fakebin-prerror-"));
-    const { binDir, verifyScriptPath, summarizerScriptPath } = makeFakeBin(tmpBinDir, {
+    const { binDir, verifyHarnessPath, summarizerScriptPath } = makeFakeBin(tmpBinDir, {
       implementExitCode: 0,
       verifyStatus: "ok",
       prCreateExitCode: 1, // gh pr create fails → PrError
       prCreateOutput: "authentication failed",
     });
 
+    const implScript = writeScript(tmpBinDir, "fake-impl-ok.sh", `#!/bin/sh\nexit 0\n`);
     const planPath = writePlan(tmpBinDir, "Test PrError Propagation");
-    const configPath = writeFakeConfig(tmpBinDir, binDir, verifyScriptPath, summarizerScriptPath);
+    const configPath = writeFakeConfig(tmpBinDir, {
+      implementCommandTemplate: `${implScript} @{promptFile}`,
+      verifyCommandTemplate: `${verifyHarnessPath} @{promptFile}`,
+      summarizerCommandTemplate: `${summarizerScriptPath} @{promptFile}`,
+    });
 
     await runWithFakePath(repoDir, binDir, planPath, configPath, PrError);
-  }, 60000);
+  }, 120000);
 
   test("(c) PR summarizer failure throws out of runCommand", async () => {
     const repoDir = await makeGitRepo();
     const tmpBinDir = mkdtempSync(join(tmpdir(), "adversary-run-fakebin-pr-summary-fail-"));
 
-    // Build a bin dir where the summarizer for PR summary fails
     const binDir = join(tmpBinDir, "bin");
     mkdirSync(binDir, { recursive: true });
 
     const prCreateArgsLog = join(tmpBinDir, "pr-create-args.log");
 
-    // Fake 'pi' — exits 0 for --help (preflight check), and 0 otherwise (implement succeeds)
-    writeScript(binDir, "pi",
-      `#!/bin/sh\nif [ "$1" = "--help" ]; then\n  exit 0\nfi\nexit 0\n`
-    );
+    // Fake implement harness — exits 0 for implement
+    const implScript = writeScript(tmpBinDir, "fake-impl-ok.sh", `#!/bin/sh\nexit 0\n`);
 
-    // Fake summarizer — fails (exits non-zero) to simulate PR summarizer failure
-    const failSummarizerScript = writeScript(tmpBinDir, "fail-pr-summarizer.sh",
-      `#!/bin/sh\nexit 1\n`
-    );
-
-    // Fake verify JSON (clean — so loop completes and we reach PR creation)
-    const verifyJsonPath = join(tmpBinDir, "verify-output.json");
-    writeFileSync(verifyJsonPath, JSON.stringify({
-      schemaVersion: 1,
-      status: "ok",
+    // Fake verify harness — outputs clean verify JSON
+    const verifyHarnessPath = writeFakeVerifyHarness(tmpBinDir, "fake-verify-harness.sh", {
       findings: [],
-    }));
+      status: "ok",
+    });
 
-    const verifyScriptPath = join(binDir, "verify-script.sh");
-    writeScript(binDir, "verify-script.sh",
-      `#!/bin/sh
-for arg in "$@"; do
-  case "$arg" in
-    --output=*) OUTPUT="\${arg#*=}" ;;
-  esac
-done
-if [ -n "$OUTPUT" ]; then
-  cp "${verifyJsonPath}" "$OUTPUT"
-fi
-exit 0
-`
+    // Fake summarizer for commit messages (succeeds) — PR summary will fail below
+    const goodSummarizerPath = writeScript(tmpBinDir, "good-commit-summarizer.sh",
+      `#!/bin/sh\necho '{ "commitMessage": "feat: implement changes", "turnSummary": "Done." }'\nexit 0\n`
     );
 
     writeScript(binDir, "gh",
@@ -383,18 +409,37 @@ exit 0
       `#!/bin/sh\necho "glab not expected" >&2\nexit 1\n`
     );
 
-    const configPath = join(tmpBinDir, ".adversary.json");
-    const config = {
-      baseBranch: "main",
-      implementCommandTemplate: `${join(binDir, "pi")} -p {promptFile}`,
-      verifyCommandTemplate: `${verifyScriptPath} --output={verifyOutputFile}`,
-      summarizerCommandTemplate: failSummarizerScript,
-      implementTimeoutMs: 15000,
-      verifyTimeoutMs: 15000,
-      prTimeoutMs: 15000,
-      summarizerTimeoutMs: 15000,
-    };
-    writeFileSync(configPath, JSON.stringify(config));
+    // The summarizer template needs to handle both commit messages and PR summaries.
+    // The PR summarizer is called separately with a different prompt. We use the same
+    // summarizerCommandTemplate for both. We make it output commit JSON first,
+    // but fail on the PR summary invocation by detecting the prompt type.
+    // Actually, the simplest approach: always fail the summarizer — but then commit-msg
+    // generation fails first, giving summarizer-failure outcome.
+    //
+    // Better: output commit JSON but fail PR summary:
+    // PR summary prompt contains "PR" or "pull request" keywords.
+    const smartSummarizerPath = writeScript(tmpBinDir, "smart-summarizer.sh",
+      `#!/bin/sh
+PROMPT_FILE=""
+for arg in "$@"; do
+  case "$arg" in
+    @*) PROMPT_FILE="\${arg#@}" ;;
+  esac
+done
+CONTENT=$(cat "$PROMPT_FILE" 2>/dev/null || echo "")
+if echo "$CONTENT" | grep -qi "pull request\\|PR description\\|reviewer guide"; then
+  exit 1
+fi
+echo '{ "commitMessage": "feat: implement changes", "turnSummary": "Done." }'
+exit 0
+`
+    );
+
+    const configPath = writeFakeConfig(tmpBinDir, {
+      implementCommandTemplate: `${implScript} @{promptFile}`,
+      verifyCommandTemplate: `${verifyHarnessPath} @{promptFile}`,
+      summarizerCommandTemplate: `${smartSummarizerPath} @{promptFile}`,
+    });
 
     const planPath = writePlan(tmpBinDir, "Test PR Summary Failure Throws");
 
@@ -403,7 +448,6 @@ exit 0
       PATH: `${binDir}:${process.env.PATH ?? ""}`,
     };
 
-    // PR summarizer failure must throw with a message indicating the summarizer failed
     await expect(
       runCommand({
         plan: planPath,
@@ -415,15 +459,11 @@ exit 0
       })
     ).rejects.toThrow("PR summarizer command failed");
 
-    // 'gh pr create' must NOT have been called since summary failed
     const argsFile = Bun.file(prCreateArgsLog);
     expect(await argsFile.exists()).toBe(false);
-  }, 60000);
+  }, 120000);
 
   test("(d) summarizer-failure (commit-msg) skips push and PR creation", async () => {
-    // This test verifies VI-1: summarizer-failure must be included in isFailureOutcome.
-    // Implement succeeds and makes repo changes, but the commit-message summarizer fails.
-    // runCommand must NOT push or call 'gh pr create'.
     const repoDir = await makeGitRepo();
     const tmpBinDir = mkdtempSync(join(tmpdir(), "adversary-run-fakebin-summfail-"));
 
@@ -432,17 +472,9 @@ exit 0
 
     const prCreateArgsLog = join(tmpBinDir, "pr-create-args.log");
 
-    // Fake 'pi' — exits 0 for --help (preflight), and creates a repo change on normal run
-    // so that hasChanges() returns true and generateCommitMessage is called.
-    writeScript(binDir, "pi",
-      `#!/bin/sh
-if [ "$1" = "--help" ]; then
-  exit 0
-fi
-# Create a file change in cwd so the repo has staged changes
-echo "change $(date +%s%N)" >> implement-output.txt
-exit 0
-`
+    // Fake implement harness — creates a repo change so hasChanges() returns true
+    const implScript = writeScript(tmpBinDir, "fake-impl-changes.sh",
+      `#!/bin/sh\necho "change $(date +%s%N)" >> implement-output.txt\nexit 0\n`
     );
 
     // Commit-message summarizer fails (exits non-zero)
@@ -450,28 +482,11 @@ exit 0
       `#!/bin/sh\nexit 1\n`
     );
 
-    // Fake verify JSON (won't be reached because summarizer fails first, but needed for config)
-    const verifyJsonPath = join(tmpBinDir, "verify-output.json");
-    writeFileSync(verifyJsonPath, JSON.stringify({
-      schemaVersion: 1,
-      status: "ok",
+    // Fake verify harness (not reached because summarizer fails first)
+    const verifyHarnessPath = writeFakeVerifyHarness(tmpBinDir, "fake-verify-harness.sh", {
       findings: [],
-    }));
-
-    const verifyScriptPath = join(tmpBinDir, "verify-script.sh");
-    writeScript(tmpBinDir, "verify-script.sh",
-      `#!/bin/sh
-for arg in "$@"; do
-  case "$arg" in
-    --output=*) OUTPUT="\${arg#*=}" ;;
-  esac
-done
-if [ -n "$OUTPUT" ]; then
-  cp "${verifyJsonPath}" "$OUTPUT"
-fi
-exit 0
-`
-    );
+      status: "ok",
+    });
 
     writeScript(binDir, "gh",
       `#!/bin/sh
@@ -491,18 +506,11 @@ exit 0
       `#!/bin/sh\necho "glab not expected" >&2\nexit 1\n`
     );
 
-    const configPath = join(tmpBinDir, ".adversary.json");
-    const config = {
-      baseBranch: "main",
-      implementCommandTemplate: `${join(binDir, "pi")} -p {promptFile}`,
-      verifyCommandTemplate: `${verifyScriptPath} --output={verifyOutputFile}`,
-      summarizerCommandTemplate: failSummarizerScript,
-      implementTimeoutMs: 15000,
-      verifyTimeoutMs: 15000,
-      prTimeoutMs: 15000,
-      summarizerTimeoutMs: 15000,
-    };
-    writeFileSync(configPath, JSON.stringify(config));
+    const configPath = writeFakeConfig(tmpBinDir, {
+      implementCommandTemplate: `${implScript} @{promptFile}`,
+      verifyCommandTemplate: `${verifyHarnessPath} @{promptFile}`,
+      summarizerCommandTemplate: `${failSummarizerScript} @{promptFile}`,
+    });
 
     const planPath = writePlan(tmpBinDir, "Test Commit-Msg Summarizer Failure Skips PR");
 
@@ -511,7 +519,6 @@ exit 0
       PATH: `${binDir}:${process.env.PATH ?? ""}`,
     };
 
-    // runCommand should resolve without throwing — summarizer-failure is a terminal outcome (exit 0)
     await expect(
       runCommand({
         plan: planPath,
@@ -523,7 +530,6 @@ exit 0
       })
     ).resolves.toBeUndefined();
 
-    // 'gh pr create' must NOT have been called
     const argsFile = Bun.file(prCreateArgsLog);
     expect(await argsFile.exists()).toBe(false);
   }, 60000);

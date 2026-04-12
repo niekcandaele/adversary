@@ -1,5 +1,6 @@
 import { isGitRepo, isCleanWorkingTree, getRemoteUrl } from "../git/index.js";
 import { fileExists } from "../utils/fs.js";
+import type { BrowserAutomationMode, ToolchainDiscovery } from "../types/index.js";
 
 export class PreflightError extends Error {
   constructor(message: string) {
@@ -47,24 +48,112 @@ async function checkGlabAuth(env?: NodeJS.ProcessEnv): Promise<boolean> {
   return code === 0;
 }
 
-async function checkVerifyContract(
-  cwd: string,
+/**
+ * Extract the harness binary name from a command template.
+ * Takes the first word (token) from the template before any spaces or flags.
+ */
+export function extractHarnessBinary(commandTemplate: string): string {
+  const trimmed = commandTemplate.trim();
+  const firstSpace = trimmed.indexOf(" ");
+  return firstSpace === -1 ? trimmed : trimmed.slice(0, firstSpace);
+}
+
+/**
+ * Check that all harness binaries used in command templates are in PATH.
+ * Exported for unit testing.
+ */
+export async function checkHarnessBinaries(
+  templates: string[],
   env?: NodeJS.ProcessEnv
 ): Promise<{ ok: boolean; reason?: string }> {
-  // Run `pi --help` to confirm pi is functional. This is a smoke-test only;
-  // the structured output contract (--format=json / --output=) is validated at
-  // runtime by parsing the verify.json artifact produced by the verify step.
-  const proc = Bun.spawn(["pi", "--help"], {
-    cwd,
-    stdout: "pipe",
-    stderr: "pipe",
-    env: env ?? process.env,
-  });
-  const code = await proc.exited;
-  if (code !== 0) {
-    return { ok: false, reason: "pi --help returned non-zero exit code" };
+  const binaries = new Set(templates.map(extractHarnessBinary).filter((b) => b.length > 0));
+
+  for (const binary of binaries) {
+    if (!(await commandExists(binary, env))) {
+      return {
+        ok: false,
+        reason: `Harness binary "${binary}" is not available in PATH. Install it or update your command template.`,
+      };
+    }
   }
   return { ok: true };
+}
+
+/**
+ * Check browser automation availability based on mode and discovery.
+ * Only meaningful when called after discovery — call on turn 1 only.
+ */
+export async function checkBrowserAutomation(
+  mode: BrowserAutomationMode,
+  discovery: ToolchainDiscovery
+): Promise<void> {
+  if (mode === "skip") return;
+
+  const hasBrowserDeps = discovery.browserDeps.length > 0;
+  if (hasBrowserDeps) return;
+
+  const message =
+    "No browser automation dependencies found (Playwright/Puppeteer/Cypress). " +
+    "UX reviewer and exerciser will operate without browser automation.\n";
+
+  if (mode === "warn") {
+    process.stderr.write(`  Warning: ${message}`);
+
+    if (process.stdin.isTTY) {
+      // Prompt user to continue — write to stderr so stdout remains clean
+      process.stderr.write("Continue anyway? [y/N] ");
+      const answer = await readLineFromStdin();
+      if (!answer.toLowerCase().startsWith("y")) {
+        throw new PreflightError("Aborted: browser automation not available.");
+      }
+    } else {
+      process.stderr.write("  [preflight] Non-interactive mode, continuing without browser automation.\n");
+    }
+    return;
+  }
+
+  if (mode === "require") {
+    throw new PreflightError(
+      `Browser automation is required (browserAutomation: "require") but no browser dependencies found. ` +
+        `Install playwright, puppeteer, or cypress, or set browserAutomation to "warn" or "skip".`
+    );
+  }
+}
+
+async function readLineFromStdin(): Promise<string> {
+  return new Promise((resolve) => {
+    let buf = "";
+    let resolved = false;
+
+    function onData(chunk: string) {
+      buf += chunk;
+      const newline = buf.indexOf("\n");
+      const line = newline !== -1 ? buf.slice(0, newline) : buf;
+      // Pause stdin to stop flowing mode after reading, preventing the process
+      // from staying alive due to an open stdin stream.
+      finish(line);
+    }
+
+    function onEnd() {
+      finish("");
+    }
+
+    function finish(line: string) {
+      if (resolved) return;
+      resolved = true;
+      // Remove both listeners to avoid the alternate one leaking as a dangling listener
+      process.stdin.removeListener("data", onData);
+      process.stdin.removeListener("end", onEnd);
+      process.stdin.pause();
+      resolve(line);
+    }
+
+    process.stdin.setEncoding("utf8");
+    // If stdin closes (EOF) before any data arrives, resolve with empty string
+    // rather than hanging indefinitely.
+    process.stdin.once("data", onData);
+    process.stdin.once("end", onEnd);
+  });
 }
 
 export interface PreflightResult {
@@ -77,6 +166,7 @@ export interface PreflightResult {
 export async function runPreflight(
   cwd: string,
   planFile: string,
+  config: import("../types/index.js").AdversaryConfig,
   env?: NodeJS.ProcessEnv
 ): Promise<PreflightResult> {
   // 1. Must be inside a git repo
@@ -99,21 +189,31 @@ export async function runPreflight(
     throw new PreflightError(`Plan file is empty: ${planFile}`);
   }
 
-  // 4. Required commands
+  // 4. Required commands — git must always be present
   if (!(await commandExists("git", env))) {
     throw new PreflightError("git is not available in PATH.");
   }
-  if (!(await commandExists("pi", env))) {
-    throw new PreflightError("pi is not available in PATH. Install it before running adversary.");
+
+  // 5. Check harness binaries from command templates
+  const harnessBinariesCheck = await checkHarnessBinaries(
+    [
+      config.implementCommandTemplate,
+      config.verifyCommandTemplate,
+      config.summarizerCommandTemplate,
+    ],
+    env
+  );
+  if (!harnessBinariesCheck.ok) {
+    throw new PreflightError(harnessBinariesCheck.reason!);
   }
 
-  // 5. Remote detection
+  // 6. Remote detection
   const remoteUrl = await getRemoteUrl(cwd);
 
-  // 6. Platform detection
+  // 7. Platform detection
   const platform = detectPlatform(remoteUrl);
 
-  // 7. PR CLI check
+  // 8. PR CLI check
   let prCli: "gh" | "glab" = "gh";
   if (platform === "gitlab") {
     if (!(await commandExists("glab", env))) {
@@ -149,12 +249,6 @@ export async function runPreflight(
       );
     }
     prCli = "gh";
-  }
-
-  // 8. Verify contract preflight
-  const verifyCheck = await checkVerifyContract(cwd, env);
-  if (!verifyCheck.ok) {
-    throw new PreflightError(`Verify command preflight failed: ${verifyCheck.reason}`);
   }
 
   return {

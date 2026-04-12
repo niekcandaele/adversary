@@ -50,6 +50,7 @@ function outcomeLabel(outcome: RunOutcome | undefined): string {
     case "verify-blocked": return "✗ Stopped — verifier returned blocked status";
     case "verify-error": return "✗ Stopped — verifier returned error status";
     case "preflight-failure": return "✗ Stopped — preflight check failed";
+    case "commit-failure": return "✗ Stopped — commit step failed";
     default: return "Unknown outcome";
   }
 }

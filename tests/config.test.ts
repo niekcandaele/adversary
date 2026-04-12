@@ -410,3 +410,129 @@ describe("resolveGitRoot via getStateDir", () => {
     expect(fromRoot).toBe(fromDeep);
   });
 });
+
+describe("new config fields", () => {
+  let isolatedXdgDir: string;
+  let savedXdgConfigHome: string | undefined;
+
+  beforeEach(async () => {
+    isolatedXdgDir = await mkdtemp(join(tmpdir(), "adversary-xdg-new-fields-"));
+    savedXdgConfigHome = process.env.XDG_CONFIG_HOME;
+    process.env.XDG_CONFIG_HOME = isolatedXdgDir;
+  });
+
+  afterEach(async () => {
+    clearGitRootCache();
+    if (savedXdgConfigHome === undefined) {
+      delete process.env.XDG_CONFIG_HOME;
+    } else {
+      process.env.XDG_CONFIG_HOME = savedXdgConfigHome;
+    }
+    await rm(isolatedXdgDir, { recursive: true, force: true });
+  });
+
+  test("defaults include browserAutomation=warn, empty customVerificationSteps, empty skillOverrides", async () => {
+    const config = await loadConfig(tmpDir);
+    expect(config.browserAutomation).toBe("warn");
+    expect(config.customVerificationSteps).toEqual([]);
+    expect(config.skillOverrides).toEqual({});
+  });
+
+  test("loads browserAutomation from config", async () => {
+    const configPath = join(tmpDir, "adv-browser.json");
+    await writeFile(configPath, JSON.stringify({ browserAutomation: "require" }));
+    const config = await loadConfig(tmpDir, configPath);
+    expect(config.browserAutomation).toBe("require");
+  });
+
+  test("throws on invalid browserAutomation value", async () => {
+    const configPath = join(tmpDir, "adv-bad-browser.json");
+    await writeFile(configPath, JSON.stringify({ browserAutomation: "invalid" }));
+    await expect(loadConfig(tmpDir, configPath)).rejects.toThrow();
+  });
+
+  test("loads customVerificationSteps from config", async () => {
+    const configPath = join(tmpDir, "adv-steps.json");
+    await writeFile(configPath, JSON.stringify({
+      customVerificationSteps: [
+        { name: "my-check", commandTemplate: "my-check {promptFile}", phase: "parallel" },
+        { name: "seq-check", commandTemplate: "seq-check", phase: "sequential", timeoutMs: 60000 },
+      ],
+    }));
+    const config = await loadConfig(tmpDir, configPath);
+    expect(config.customVerificationSteps).toHaveLength(2);
+    expect(config.customVerificationSteps[0]?.name).toBe("my-check");
+    expect(config.customVerificationSteps[0]?.phase).toBe("parallel");
+    expect(config.customVerificationSteps[1]?.name).toBe("seq-check");
+    expect(config.customVerificationSteps[1]?.timeoutMs).toBe(60000);
+  });
+
+  test("throws on customVerificationSteps with invalid phase", async () => {
+    const configPath = join(tmpDir, "adv-bad-steps.json");
+    await writeFile(configPath, JSON.stringify({
+      customVerificationSteps: [
+        { name: "bad", commandTemplate: "cmd", phase: "invalid-phase" },
+      ],
+    }));
+    await expect(loadConfig(tmpDir, configPath)).rejects.toThrow();
+  });
+
+  test("loads skillOverrides from config", async () => {
+    const configPath = join(tmpDir, "adv-overrides.json");
+    await writeFile(configPath, JSON.stringify({
+      skillOverrides: {
+        reviewer: { extraContext: "Focus on TypeScript patterns." },
+      },
+    }));
+    const config = await loadConfig(tmpDir, configPath);
+    expect(config.skillOverrides.reviewer?.extraContext).toBe("Focus on TypeScript patterns.");
+  });
+
+  test("throws when skillOverride has both extraContext and promptFile", async () => {
+    const configPath = join(tmpDir, "adv-bad-overrides.json");
+    await writeFile(configPath, JSON.stringify({
+      skillOverrides: {
+        reviewer: { extraContext: "extra", promptFile: "/some/path.md" },
+      },
+    }));
+    await expect(loadConfig(tmpDir, configPath)).rejects.toThrow("mutually exclusive");
+  });
+
+  // VI-6: customVerificationSteps rejects non-array values
+  test("throws when customVerificationSteps is a string", async () => {
+    const configPath = join(tmpDir, "adv-steps-string.json");
+    await writeFile(configPath, JSON.stringify({ customVerificationSteps: "my-check" }));
+    await expect(loadConfig(tmpDir, configPath)).rejects.toThrow();
+  });
+
+  test("throws when customVerificationSteps is an object (not array)", async () => {
+    const configPath = join(tmpDir, "adv-steps-object.json");
+    await writeFile(configPath, JSON.stringify({ customVerificationSteps: { name: "my-check" } }));
+    await expect(loadConfig(tmpDir, configPath)).rejects.toThrow();
+  });
+
+  test("throws when customVerificationSteps is a number", async () => {
+    const configPath = join(tmpDir, "adv-steps-number.json");
+    await writeFile(configPath, JSON.stringify({ customVerificationSteps: 42 }));
+    await expect(loadConfig(tmpDir, configPath)).rejects.toThrow();
+  });
+
+  // VI-7: skillOverrides rejects non-object values
+  test("throws when skillOverrides is an array", async () => {
+    const configPath = join(tmpDir, "adv-overrides-array.json");
+    await writeFile(configPath, JSON.stringify({ skillOverrides: [{ reviewer: {} }] }));
+    await expect(loadConfig(tmpDir, configPath)).rejects.toThrow();
+  });
+
+  test("throws when skillOverrides is a string", async () => {
+    const configPath = join(tmpDir, "adv-overrides-string.json");
+    await writeFile(configPath, JSON.stringify({ skillOverrides: "reviewer" }));
+    await expect(loadConfig(tmpDir, configPath)).rejects.toThrow();
+  });
+
+  test("throws when skillOverrides is a number", async () => {
+    const configPath = join(tmpDir, "adv-overrides-num.json");
+    await writeFile(configPath, JSON.stringify({ skillOverrides: 0 }));
+    await expect(loadConfig(tmpDir, configPath)).rejects.toThrow();
+  });
+});
