@@ -7,7 +7,7 @@ Bun CLI that runs an adversarial implement→verify loop on top of `pi`.
 `adversary` takes a plan file, creates a feature branch, and runs a loop where:
 
 1. An **implementer** agent implements (or improves) the code
-2. A **verifier** agent reviews the result and emits structured JSON findings
+2. A **multi-skill verification pipeline** reviews the result — running reviewer, QA, tester, static-analysis, and UX reviewer in parallel, then the exerciser sequentially, before synthesizing deduplicated findings
 3. The loop continues until all findings above the severity threshold are resolved or max turns is reached
 4. A draft PR/MR is created at the end
 
@@ -77,16 +77,72 @@ Create `.adversary.json` in the repo root (or a global config for shared setting
 {
   "baseBranch": "main",
   "implementCommandTemplate": "pi -p @{promptFile}",
-  "verifyCommandTemplate": "pi -p \"/skill:verify --mode=report-only --format=json --output={verifyOutputFile}\"",
+  "verifyCommandTemplate": "pi -p @{promptFile}",
   "summarizerCommandTemplate": "pi -p @{promptFile}",
   "implementTimeoutMs": 2700000,
-  "verifyTimeoutMs": 5400000,
+  "verifyTimeoutMs": 900000,
   "prTimeoutMs": 300000,
-  "summarizerTimeoutMs": 300000
+  "summarizerTimeoutMs": 300000,
+  "browserAutomation": "warn",
+  "customVerificationSteps": [],
+  "skillOverrides": {}
 }
 ```
 
 All fields are optional — unset fields use the defaults above.
+
+> **Note:** The `@` prefix in `@{promptFile}` is `pi` CLI syntax (read from file), not adversary template syntax. Adversary template variables use plain `{variable}` form.
+
+### `browserAutomation`
+
+Controls behavior when no browser automation dependencies (Playwright/Puppeteer/Cypress) are detected:
+
+| Value | Behavior |
+|-------|----------|
+| `"warn"` (default) | Print warning, prompt to continue (auto-continues in non-TTY) |
+| `"require"` | Fail preflight if browser automation is not available |
+| `"skip"` | Silently skip browser automation checks |
+
+### `customVerificationSteps`
+
+Add custom verification steps that run alongside the built-in skills:
+
+```json
+{
+  "customVerificationSteps": [
+    {
+      "name": "security-scan",
+      "commandTemplate": "my-scanner --context {contextFile}",
+      "phase": "parallel",
+      "timeoutMs": 300000
+    }
+  ]
+}
+```
+
+- `phase: "parallel"` runs alongside built-in phase 1 skills
+- `phase: "sequential"` runs after the exerciser (receives phase 1 findings)
+- `{contextFile}` is a temp file containing scope context, plan content, and discovery data
+- `timeoutMs` is optional (defaults to `verifyTimeoutMs`)
+
+Custom steps must output JSON matching the verify findings schema (see [Verify JSON Contract](#verify-json-contract)).
+
+### `skillOverrides`
+
+Override or extend the vendored prompts for built-in verification skills:
+
+```json
+{
+  "skillOverrides": {
+    "reviewer": { "extraContext": "Focus on SQL injection in the data layer" },
+    "qa": { "promptFile": "/path/to/custom-qa-prompt.md" }
+  }
+}
+```
+
+- `extraContext`: appended to the vendored prompt as an "Additional Context" section
+- `promptFile`: replaces the vendored prompt entirely
+- These are mutually exclusive — setting both is an error
 
 ### `summarizerCommandTemplate`
 
@@ -125,16 +181,54 @@ Commands are templates with these substitution variables:
 | `{promptFile}` | Prompt file path (implement prompt for implementer, summarizer prompt for summarizer) |
 | `{findingsFile}` | Current findings markdown path |
 | `{historyFile}` | Run history markdown path |
-| `{verifyOutputFile}` | Expected verify JSON output path |
+| `{verifyOutputFile}` | Verify JSON output path (deprecated — the built-in pipeline writes `verify.json` internally) |
+| `{contextFile}` | Context file path (custom verification steps only — contains scope, plan, discovery data) |
 | `{threshold}` | Severity threshold |
 | `{turn}` | Current turn number |
 | `{maxTurns}` | Maximum turns |
 | `{branch}` | Feature branch name |
 | `{baseBranch}` | Base branch name |
 
+## Verification Pipeline
+
+Each turn, adversary orchestrates a multi-phase verification pipeline in TypeScript. Each skill runs as a separate harness invocation (via `verifyCommandTemplate`) with its own fresh context window.
+
+### Phases
+
+```text
+Phase 1 (parallel):  reviewer, qa, tester, static-analysis, ux-reviewer, plan-completeness
+                      + any custom steps with phase: "parallel"
+Phase 2 (sequential): exerciser (receives phase 1 findings)
+                      + any custom steps with phase: "sequential"
+Phase 3 (sequential): synthesis — LLM deduplicates and merges findings into final JSON
+                      (falls back to deterministic dedup if synthesis fails)
+```
+
+### Built-in skills
+
+| Skill | Purpose |
+|-------|---------|
+| `reviewer` | Design, architecture, coherence, hardening, security |
+| `qa` | Test coverage quality and adequacy |
+| `tester` | Run test suite, report pass/fail |
+| `static-analysis` | Run linters and type-checkers |
+| `ux-reviewer` | CLI output, error messages, user-facing strings |
+| `exerciser` | End-to-end smoke test — starts the app and exercises the feature |
+| `plan-completeness` | Checks implementation against the plan |
+
+### How it works
+
+1. **Scope detection**: Deterministic git diff — `merge-base`, `--name-status`, `--stat`
+2. **Toolchain discovery**: Single LLM invocation to find test/build/lint commands. Cached after turn 1.
+3. **Browser automation preflight** (turn 1 only): Checks for Playwright/Puppeteer/Cypress based on `browserAutomation` config
+4. **Skill execution**: Each skill's vendored prompt is interpolated with scope context, discovery results, and plan content, then run via `verifyCommandTemplate`
+5. **Synthesis**: All skill findings are deduplicated and merged into a single `verify.json`
+
+Skill prompts are vendored in `src/prompts/skills/*.md` and can be overridden per-skill via `skillOverrides` config.
+
 ## Verify JSON Contract
 
-The verify command must write a JSON file to `{verifyOutputFile}` with this schema:
+The built-in verification pipeline produces this JSON internally. For custom or external verify setups, the output must conform to this schema:
 
 ```json
 {
@@ -201,13 +295,33 @@ Structure:
         commit-msg-prompt.md
         commit-msg-summarizer.stdout.log
         commit-msg-summarizer.stderr.log
-        verify-command.txt
-        verify.stdout.log
-        verify.stderr.log
         verify.json
         turn-summary.json
         current-findings.md
         run-history.md
+        verify/
+          scope.json
+          discovery.json
+          skills/
+            reviewer.prompt.md
+            reviewer.output.json
+            reviewer.stderr.log
+            qa.prompt.md
+            qa.output.json
+            tester.prompt.md
+            tester.output.json
+            static-analysis.prompt.md
+            static-analysis.output.json
+            ux-reviewer.prompt.md
+            ux-reviewer.output.json
+            plan-completeness.prompt.md
+            plan-completeness.output.json
+          exerciser.prompt.md
+          exerciser.output.json
+          exerciser.stderr.log
+          synthesis.prompt.md
+          synthesis.output.json
+          synthesis.stderr.log
       turn-2/
         ...
 ```
@@ -217,9 +331,11 @@ Structure:
 | Timeout | Default | Config key |
 |---------|---------|-----------|
 | Implement step | 45 minutes | `implementTimeoutMs` |
-| Verify step | 90 minutes | `verifyTimeoutMs` |
+| Verify step (per skill) | 15 minutes | `verifyTimeoutMs` |
 | PR creation | 5 minutes | `prTimeoutMs` |
 | Summarizer step | 5 minutes | `summarizerTimeoutMs` |
+
+The verify timeout applies per-skill invocation. A full verification turn runs multiple skills in parallel, so wall-clock time is roughly one timeout (not multiplied).
 
 ## Exit Codes
 

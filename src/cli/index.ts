@@ -46,16 +46,35 @@ Config files (merged in order: defaults < global < per-project < CLI flags):
   Per-project: .adversary.json  (in repo root, or --config path)
 
 Config file fields:
+  Note: "@{promptFile}" uses the pi CLI's file-injection syntax (@ prefix). This is pi-specific
+  syntax, not adversary template syntax. Adversary template variables use plain {variable} form.
+
   {
     "baseBranch": "main",
     "implementCommandTemplate": "pi -p @{promptFile}",
-    "verifyCommandTemplate": "pi -p \\"/skill:verify --mode=report-only --format=json --output={verifyOutputFile} --plan-file={planFile}\\"",
+    "verifyCommandTemplate": "pi -p @{promptFile}",
     "summarizerCommandTemplate": "pi -p @{promptFile}",
     "implementTimeoutMs": 2700000,
-    "verifyTimeoutMs": 5400000,
+    "verifyTimeoutMs": 900000,
     "prTimeoutMs": 300000,
-    "summarizerTimeoutMs": 300000
+    "summarizerTimeoutMs": 300000,
+    "browserAutomation": "warn",
+    "customVerificationSteps": [],
+    "skillOverrides": {}
   }
+
+  browserAutomation: "warn" | "require" | "skip"
+    Controls behavior when no browser automation deps (Playwright/Puppeteer/Cypress) are found.
+    "warn" (default): print warning, prompt to continue
+    "require": fail preflight if browser automation not available
+    "skip": silently skip browser automation checks
+
+  customVerificationSteps: array of custom verification steps
+    Each step: { "name": "...", "commandTemplate": "...", "phase": "parallel"|"sequential", "timeoutMs": N }
+
+  skillOverrides: per-skill prompt overrides
+    { "reviewer": { "extraContext": "extra context..." } }
+    { "reviewer": { "promptFile": "/path/to/custom-prompt.md" } }
 
 Run artifacts:
   Stored in ~/.local/state/adversary/<repo>-<hash>/runs/ (or $XDG_STATE_HOME/adversary/...)
@@ -75,9 +94,9 @@ Template variables:
   {branch}           Feature branch name
   {baseBranch}       Base branch name
 
-Timeouts (defaults):
+Timeouts (set via config file — defaults):
   implementTimeoutMs:  2700000 (45 minutes)
-  verifyTimeoutMs:     5400000 (90 minutes)
+  verifyTimeoutMs:     900000  (15 minutes, per-skill)
   prTimeoutMs:         300000  (5 minutes)
   summarizerTimeoutMs: 300000  (5 minutes)
 

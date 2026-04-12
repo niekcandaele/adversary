@@ -1,6 +1,67 @@
+// ── Skill types ──────────────────────────────────────────────────────────────
+
+export type BuiltinSkillName =
+  | "reviewer"
+  | "qa"
+  | "tester"
+  | "static-analysis"
+  | "ux-reviewer"
+  | "exerciser"
+  | "plan-completeness";
+
+export type BrowserAutomationMode = "warn" | "require" | "skip";
+
+export interface CustomVerificationStep {
+  name: string;
+  commandTemplate: string;
+  phase: "parallel" | "sequential";
+  timeoutMs?: number;
+}
+
+export interface SkillOverride {
+  extraContext?: string; // append to vendored prompt
+  promptFile?: string; // full replacement
+  // mutually exclusive — error if both present
+}
+
+export interface SkillResult {
+  skill: string;
+  exitCode: number;
+  durationMs: number;
+  findings: VerifyFinding[];
+  status: "completed" | "blocked" | "error" | "timeout";
+}
+
+export interface VerifyScope {
+  baseBranch: string;
+  mergeBase: string;
+  files: Array<{
+    path: string;
+    status: "added" | "modified" | "deleted" | "renamed";
+  }>;
+  diffCommand: string;
+  diffStat: string;
+}
+
+export interface ToolchainDiscovery {
+  testCommand: string | null;
+  buildCommand: string | null;
+  lintCommands: string[];
+  typeCheckCommands: string[];
+  startCommand: string | null;
+  browserDeps: string[];
+}
+
 // ── Verify JSON contract ─────────────────────────────────────────────────────
 
-export type VerifyStatus = "ok" | "blocked" | "error";
+/**
+ * Status of a verify run.
+ * - "ok": verification ran and found no blocking issues
+ * - "blocked": verification explicitly blocked the turn (e.g. a skill returned blocked)
+ * - "error": verification ran but encountered errors
+ * - "skipped": verification did not run (implement/summarizer/commit failure before verify step)
+ */
+export type VerifyStatus = "ok" | "blocked" | "error" | "skipped";
 
 export interface VerifyLocation {
   path: string;
@@ -33,17 +94,22 @@ export interface AdversaryConfig {
   verifyTimeoutMs: number;
   prTimeoutMs: number;
   summarizerTimeoutMs: number;
+  browserAutomation: BrowserAutomationMode;
+  customVerificationSteps: CustomVerificationStep[];
+  skillOverrides: Record<string, SkillOverride>;
 }
 
 export const DEFAULT_CONFIG: AdversaryConfig = {
   implementCommandTemplate: "pi -p @{promptFile}",
-  verifyCommandTemplate:
-    'pi -p "/skill:verify --mode=report-only --format=json --output={verifyOutputFile} --plan-file={planFile}"',
+  verifyCommandTemplate: "pi -p @{promptFile}",
   summarizerCommandTemplate: "pi -p @{promptFile}",
   implementTimeoutMs: 2700000,
-  verifyTimeoutMs: 5400000,
+  verifyTimeoutMs: 900000,
   prTimeoutMs: 300000,
   summarizerTimeoutMs: 300000,
+  browserAutomation: "warn",
+  customVerificationSteps: [],
+  skillOverrides: {},
 };
 
 // ── Summarizer output types ───────────────────────────────────────────────────
@@ -108,6 +174,14 @@ export interface TurnResult {
   verifyStatus: VerifyStatus;
   thresholdFindings: VerifyFinding[];
   belowThresholdFindings: VerifyFinding[];
+  /**
+   * Per-turn outcome for this specific turn's iteration.
+   * This is distinct from RunOutcome (RunState.outcome), which represents the final
+   * outcome of the entire run. TurnResult.outcome includes "continue" (meaning the loop
+   * will proceed to the next turn), whereas RunOutcome only covers terminal states.
+   * When the loop ends, RunState.outcome is set from the last TurnResult.outcome that
+   * maps to a terminal state (e.g. "clean", "capped", etc.).
+   */
   outcome: "continue" | "clean" | "capped" | "commit-failure" | "implement-failure" | "summarizer-failure" | "verify-failure" | "verify-blocked" | "verify-error";
 }
 
@@ -143,6 +217,14 @@ export interface TemplateVars {
   promptFile: string;
   findingsFile: string;
   historyFile: string;
+  /**
+   * @deprecated The verification pipeline now writes verify.json internally via
+   * runVerification(). This variable is retained in TemplateVars for backward
+   * compatibility with custom verifyCommandTemplate setups that reference it, but
+   * it is NOT used by the built-in multi-skill verification orchestrator.
+   * Custom setups that invoke a single verify command via verifyCommandTemplate can
+   * still use {verifyOutputFile} to know where to write their output.
+   */
   verifyOutputFile: string;
   threshold: string;
   turn: string;

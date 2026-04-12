@@ -16,16 +16,17 @@ import {
   generateHistoryFile,
 } from "../prompts/index.js";
 import { generateCommitMessage } from "../summarizer/index.js";
-import { writeText, writeJsonFile, readJsonFile, ensureDir } from "../utils/fs.js";
+import { writeText, writeJsonFile, ensureDir } from "../utils/fs.js";
 import { interpolate } from "../utils/slugify.js";
 import { formatFindingsTable } from "../ui/findingsTable.js";
+import { detectScope } from "../scope/index.js";
+import { runDiscovery, getCachedProjectSkills } from "../discovery/index.js";
+import { checkBrowserAutomation } from "../preflight/index.js";
+import { runVerification } from "../verify/index.js";
 
-export class VerifyParseError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "VerifyParseError";
-  }
-}
+// Re-export for backward compatibility
+export { VerifyParseError } from "../verify/parse.js";
+export { parseVerifyOutput } from "../verify/parse.js";
 
 /**
  * Split a list of findings into threshold (>= threshold) and below-threshold (< threshold) groups.
@@ -61,59 +62,6 @@ function buildTemplateVars(
     branch: state.branch,
     baseBranch: state.baseBranch,
   };
-}
-
-export async function parseVerifyOutput(verifyJsonPath: string): Promise<VerifyReport> {
-  let raw: unknown;
-  try {
-    raw = await readJsonFile(verifyJsonPath);
-  } catch (e) {
-    throw new VerifyParseError(`Cannot read verify output at ${verifyJsonPath}: ${e}`);
-  }
-
-  const report = raw as Record<string, unknown>;
-  if (typeof report !== "object" || report === null) {
-    throw new VerifyParseError("Verify output is not a JSON object");
-  }
-  if (report.schemaVersion !== 1) {
-    throw new VerifyParseError(`Unexpected schemaVersion: ${report.schemaVersion}`);
-  }
-  if (!["ok", "blocked", "error"].includes(report.status as string)) {
-    throw new VerifyParseError(`Invalid status: ${report.status}`);
-  }
-  if (!Array.isArray(report.findings)) {
-    throw new VerifyParseError("findings must be an array");
-  }
-
-  // Validate each individual finding shape
-  for (let i = 0; i < report.findings.length; i++) {
-    const f = report.findings[i] as Record<string, unknown>;
-    if (typeof f !== "object" || f === null) {
-      throw new VerifyParseError(`findings[${i}] is not an object`);
-    }
-    if (typeof f.title !== "string") {
-      throw new VerifyParseError(`findings[${i}].title must be a string`);
-    }
-    if (typeof f.severity !== "number") {
-      throw new VerifyParseError(`findings[${i}].severity must be a number`);
-    }
-    // Warn if severity is outside the expected 1..10 range (don't reject — external tools may use
-    // different ranges; the orchestrator still filters by threshold correctly).
-    const sev = f.severity as number;
-    if (sev < 1 || sev > 10) {
-      process.stderr.write(
-        `  Warning: findings[${i}].severity=${sev} is outside expected range 1..10 — proceeding anyway.\n`
-      );
-    }
-    if (typeof f.description !== "string") {
-      throw new VerifyParseError(`findings[${i}].description must be a string`);
-    }
-    if (!Array.isArray(f.sources)) {
-      throw new VerifyParseError(`findings[${i}].sources must be an array`);
-    }
-  }
-
-  return raw as VerifyReport;
 }
 
 export async function runLoop(options: {
@@ -198,7 +146,7 @@ export async function runLoop(options: {
         implementDurationMs: implResult.durationMs,
         verifyDurationMs: 0,
         repoChanged: false,
-        verifyStatus: "error",
+        verifyStatus: "skipped",
         thresholdFindings: [],
         belowThresholdFindings: [],
         outcome: "implement-failure",
@@ -239,7 +187,7 @@ export async function runLoop(options: {
           implementDurationMs: implResult.durationMs,
           verifyDurationMs: 0,
           repoChanged: true,
-          verifyStatus: "error",
+          verifyStatus: "skipped",
           thresholdFindings: [],
           belowThresholdFindings: [],
           outcome: "summarizer-failure",
@@ -265,7 +213,7 @@ export async function runLoop(options: {
             verifyDurationMs: 0,
             repoChanged: true,
             commitError: errorMsg,
-            verifyStatus: "error",
+            verifyStatus: "skipped",
             thresholdFindings: [],
             belowThresholdFindings: [],
             outcome: "commit-failure",
@@ -285,75 +233,72 @@ export async function runLoop(options: {
       process.stdout.write(`\n  No repo changes after implement — skipping commit.\n`);
     }
 
-    // 5. Build verify command
-    const verifyCommand = interpolate(config.verifyCommandTemplate, vars);
+    // 5. Scope detection (deterministic)
+    const verifyCommand = "multi-skill: 6 parallel + exerciser + synthesis";
     await writeText(join(turnDir, "verify-command.txt"), verifyCommand);
 
-    // 6. Run verify
     process.stdout.write("\n");
-    const verifyResult = await runStep({
-      command: verifyCommand,
-      cwd,
-      stdoutPath: join(turnDir, "verify.stdout.log"),
-      stderrPath: join(turnDir, "verify.stderr.log"),
-      timeoutMs: config.verifyTimeoutMs,
-      label: "verify",
-      env: options.env,
-    });
 
-    // 7. Parse verify JSON
-    const verifyJsonPath = vars.verifyOutputFile;
     let report: VerifyReport;
+    const verifyStart = Date.now();
+    try {
+      // 5a. Detect scope
+      const scope = await detectScope(cwd, state.baseBranch);
 
-    if (!verifyResult.success) {
-      // Check if verify output was written anyway (it might exit non-zero with blocked status)
-      try {
-        report = await parseVerifyOutput(verifyJsonPath);
-      } catch {
-        const turnResult: TurnResult = {
-          turn,
-          implementCommand,
-          verifyCommand,
-          implementDurationMs: implResult.durationMs,
-          verifyDurationMs: verifyResult.durationMs,
-          repoChanged,
-          commitSha,
-          verifyStatus: "error",
-          thresholdFindings: [],
-          belowThresholdFindings: [],
-          outcome: "verify-failure",
-        };
-        state.turns.push(turnResult);
-        await writeTurnSummary(turnDir, turnResult);
-        state.outcome = "verify-failure";
-        return state;
+      // 5b. Discovery (cached after turn 1)
+      const discovery = await runDiscovery({
+        cwd,
+        scope,
+        config,
+        runDir: state.runDir,
+        turnDir,
+        env: options.env,
+      });
+
+      // 5c. Browser automation check (turn 1 only)
+      if (turn === 1) {
+        await checkBrowserAutomation(config.browserAutomation, discovery);
       }
-    } else {
-      try {
-        report = await parseVerifyOutput(verifyJsonPath);
-      } catch (e) {
-        process.stderr.write(`  Warning: verify output parse error: ${e}\n`);
-        const turnResult: TurnResult = {
-          turn,
-          implementCommand,
-          verifyCommand,
-          implementDurationMs: implResult.durationMs,
-          verifyDurationMs: verifyResult.durationMs,
-          repoChanged,
-          commitSha,
-          verifyStatus: "error",
-          thresholdFindings: [],
-          belowThresholdFindings: [],
-          outcome: "verify-failure",
-        };
-        state.turns.push(turnResult);
-        await writeTurnSummary(turnDir, turnResult);
-        state.outcome = "verify-failure";
-        return state;
-      }
+
+      // 5d. Read cached project skills (populated by runDiscovery on turn 1,
+      //     avoids redundant find commands on every subsequent turn)
+      const projectSkills = await getCachedProjectSkills(state.runDir);
+
+      // 5e. Run verification pipeline
+      report = await runVerification({
+        cwd,
+        turnDir,
+        scope,
+        discovery,
+        planContent,
+        config,
+        projectSkills,
+        env: options.env,
+      });
+    } catch (e) {
+      process.stderr.write(`  Error: verification pipeline failed: ${e}\n`);
+      const turnResult: TurnResult = {
+        turn,
+        implementCommand,
+        verifyCommand,
+        implementDurationMs: implResult.durationMs,
+        verifyDurationMs: Date.now() - verifyStart,
+        repoChanged,
+        commitSha,
+        verifyStatus: "error",
+        thresholdFindings: [],
+        belowThresholdFindings: [],
+        outcome: "verify-failure",
+      };
+      state.turns.push(turnResult);
+      await writeTurnSummary(turnDir, turnResult);
+      state.outcome = "verify-failure";
+      return state;
     }
 
-    // 8. Handle blocked
+    const verifyDurationMs = Date.now() - verifyStart;
+
+    // 6. Handle blocked
     if (report.status === "blocked") {
       process.stderr.write(`\n[Turn ${turn}] Verify returned status=blocked. Stopping.\n`);
       const { thresholdFindings, belowThresholdFindings } = filterFindings(report.findings, threshold);
@@ -362,7 +307,7 @@ export async function runLoop(options: {
         implementCommand,
         verifyCommand,
         implementDurationMs: implResult.durationMs,
-        verifyDurationMs: verifyResult.durationMs,
+        verifyDurationMs,
         repoChanged,
         commitSha,
         verifyStatus: "blocked",
@@ -376,7 +321,7 @@ export async function runLoop(options: {
       return state;
     }
 
-    // 8b. Handle error status — terminal like blocked
+    // 7. Handle error status
     if (report.status === "error") {
       process.stderr.write(`\n[Turn ${turn}] Verify returned status=error. Stopping.\n`);
       const { thresholdFindings, belowThresholdFindings } = filterFindings(report.findings, threshold);
@@ -385,7 +330,7 @@ export async function runLoop(options: {
         implementCommand,
         verifyCommand,
         implementDurationMs: implResult.durationMs,
-        verifyDurationMs: verifyResult.durationMs,
+        verifyDurationMs,
         repoChanged,
         commitSha,
         verifyStatus: "error",
@@ -399,17 +344,17 @@ export async function runLoop(options: {
       return state;
     }
 
-    // 9. Split findings by threshold
+    // 8. Split findings by threshold
     const { thresholdFindings, belowThresholdFindings } = filterFindings(report.findings, threshold);
 
-    // 10. Display findings
+    // 9. Display findings
     if (thresholdFindings.length > 0) {
       process.stdout.write("\n" + formatFindingsTable(thresholdFindings) + "\n");
     } else {
       process.stdout.write(`\n  ✓ No findings at or above severity threshold ${threshold}\n`);
     }
 
-    // 11. Determine outcome
+    // 10. Determine outcome
     let outcome: TurnResult["outcome"];
     if (thresholdFindings.length === 0) {
       outcome = "clean";
@@ -424,7 +369,7 @@ export async function runLoop(options: {
       implementCommand,
       verifyCommand,
       implementDurationMs: implResult.durationMs,
-      verifyDurationMs: verifyResult.durationMs,
+      verifyDurationMs,
       repoChanged,
       commitSha,
       commitMessage,
@@ -443,12 +388,14 @@ export async function runLoop(options: {
     }
 
     if (outcome === "capped") {
-      process.stdout.write(`\n  ${thresholdFindings.length} findings, ${thresholdFindings.length} at/above threshold — max turns reached\n`);
+      const totalFindings = thresholdFindings.length + belowThresholdFindings.length;
+      process.stdout.write(`\n  ${totalFindings} findings, ${thresholdFindings.length} at/above threshold — max turns reached\n`);
       state.outcome = "capped";
       return state;
     }
 
-    process.stdout.write(`\n  ${thresholdFindings.length} findings, ${thresholdFindings.length} at/above threshold — continuing to turn ${turn + 1}\n`);
+    const totalFindings = thresholdFindings.length + belowThresholdFindings.length;
+    process.stdout.write(`\n  ${totalFindings} findings, ${thresholdFindings.length} at/above threshold — continuing to turn ${turn + 1}\n`);
   }
 
   // Loop exhausted — check if last turn was a commit failure

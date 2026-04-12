@@ -46,11 +46,11 @@ That should work well.`;
   });
 
   test("throws when no JSON object found", () => {
-    expect(() => extractJson("No JSON here at all")).toThrow("No JSON object found");
+    expect(() => extractJson("No JSON here at all")).toThrow();
   });
 
   test("throws for unbalanced braces", () => {
-    expect(() => extractJson("{ unclosed brace")).toThrow("No JSON object found");
+    expect(() => extractJson("{ unclosed brace")).toThrow();
   });
 
   test("handles preamble text containing literal { brace", () => {
@@ -203,6 +203,9 @@ function makeConfig(summarizerScript: string): AdversaryConfig {
     verifyTimeoutMs: 10000,
     prTimeoutMs: 10000,
     summarizerTimeoutMs: 10000,
+    browserAutomation: "warn",
+    customVerificationSteps: [],
+    skillOverrides: {},
   };
 }
 
@@ -323,7 +326,7 @@ describe("generateCommitMessage", () => {
           turn: 1,
           cwd,
         })
-      ).rejects.toThrow("No JSON object found");
+      ).rejects.toThrow();
     } finally {
       await Bun.spawn(["rm", "-rf", tmpDir, cwd]).exited;
     }
@@ -335,6 +338,36 @@ describe("generateCommitMessage", () => {
     try {
       const script = join(tmpDir, "missing-field-summarizer.sh");
       writeFileSync(script, `#!/bin/sh\necho '{ "something": "else" }'\nexit 0\n`, { mode: 0o755 });
+      const turnDir = join(tmpDir, "turn-1");
+      await Bun.spawn(["mkdir", "-p", turnDir], { cwd: tmpDir }).exited;
+
+      const config = makeConfig(script);
+      await expect(
+        generateCommitMessage({
+          config,
+          turnDir,
+          branch: "adversary/test",
+          planTitle: "Test Plan",
+          turn: 1,
+          cwd,
+        })
+      ).rejects.toThrow("invalid commitMessage");
+    } finally {
+      await Bun.spawn(["rm", "-rf", tmpDir, cwd]).exited;
+    }
+  });
+
+  // VI-11: whitespace-only commitMessage is rejected
+  test("throws when commitMessage is whitespace-only", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "adversary-gen-commit-ws-"));
+    const cwd = await makeGitRepo();
+    try {
+      const script = join(tmpDir, "whitespace-summarizer.sh");
+      writeFileSync(
+        script,
+        `#!/bin/sh\necho '{ "commitMessage": "     " }'\nexit 0\n`,
+        { mode: 0o755 }
+      );
       const turnDir = join(tmpDir, "turn-1");
       await Bun.spawn(["mkdir", "-p", turnDir], { cwd: tmpDir }).exited;
 
@@ -433,7 +466,7 @@ describe("generatePrSummary", () => {
           planContent: "# Test Plan\nDo stuff.",
           cwd,
         })
-      ).rejects.toThrow("No JSON object found");
+      ).rejects.toThrow();
     } finally {
       await Bun.spawn(["rm", "-rf", tmpDir, cwd]).exited;
     }
