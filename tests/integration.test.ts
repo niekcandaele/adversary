@@ -441,4 +441,120 @@ describe("runLoop integration", () => {
     expect(state.turns[0]?.thresholdFindings).toHaveLength(1);
     expect(state.turns[0]?.thresholdFindings[0]?.title).toBe("Blocking Issue");
   });
+
+  test("recovers from commit failure caused by pre-commit hook", async () => {
+    const cwd = await makeGitRepo();
+    const runDir = join(cwd, ".pi-adversary", "runs", "test-run-commit-fail");
+    await initRunDir(runDir);
+    await snapshotPlan(runDir, "# Test Plan Commit Fail\nDo a thing.");
+
+    // Install a pre-commit hook that rejects commits if any file contains HOOK_FAIL_MARKER
+    const hookDir = join(cwd, ".git", "hooks");
+    writeFileSync(
+      join(hookDir, "pre-commit"),
+      `#!/bin/sh\nif git diff --cached --name-only | xargs grep -l HOOK_FAIL_MARKER 2>/dev/null; then\n  echo "pre-commit hook: found HOOK_FAIL_MARKER, rejecting commit"\n  exit 1\nfi\nexit 0\n`,
+      { mode: 0o755 }
+    );
+
+    // Turn 1: implement creates a file with the marker (commit will fail)
+    // Turn 2: implement overwrites the file without the marker (commit will succeed)
+    // Note: the script must be in .gitignore or outside the repo so the hook doesn't
+    // match the marker string inside the script itself.
+    const markerFile = join(cwd, "marker.txt");
+    const implScript = join(cwd, "fake-impl-commit-fail.sh");
+    // Add the script to .gitignore so git add -A won't stage it
+    writeFileSync(join(cwd, ".gitignore"), ".pi-adversary/\nfake-*.sh\n");
+    writeFileSync(
+      implScript,
+      `#!/bin/sh\nMARKER="HOOK_FAIL""_MARKER"\nif grep -q "$MARKER" "${markerFile}" 2>/dev/null; then\n  echo "FIXED" > "${markerFile}"\nelse\n  echo "$MARKER" > "${markerFile}"\nfi\nexit 0\n`,
+      { mode: 0o755 }
+    );
+
+    const verifyScript = writeVerifyJson(cwd, []);
+    const summarizerScript = writeFakeSummarizer(cwd, "fake-summarizer-cf.sh");
+
+    const state: RunState = {
+      runDir,
+      planFile: join(runDir, "plan.txt"),
+      planTitle: "Test Plan Commit Fail",
+      branch: "adversary/test-branch",
+      baseBranch: "main",
+      startedAt: new Date().toISOString(),
+      turns: [],
+    };
+
+    const config: AdversaryConfig = {
+      implementCommandTemplate: implScript,
+      verifyCommandTemplate: `${verifyScript} --output={verifyOutputFile}`,
+      summarizerCommandTemplate: summarizerScript,
+      implementTimeoutMs: 10000,
+      verifyTimeoutMs: 10000,
+      prTimeoutMs: 10000,
+      summarizerTimeoutMs: 10000,
+    };
+
+    await runLoop({ cwd, state, planContent: "# Test Plan Commit Fail\nDo a thing.", maxTurns: 3, threshold: 7, config });
+
+    // Turn 1 should be a commit-failure
+    expect(state.turns).toHaveLength(2);
+    expect(state.turns[0]?.outcome).toBe("commit-failure");
+    expect(state.turns[0]?.commitError).toBeDefined();
+    expect(state.turns[0]?.repoChanged).toBe(true);
+
+    // Turn 2 should recover and succeed
+    expect(state.turns[1]?.outcome).toBe("clean");
+    expect(state.outcome).toBe("clean");
+  });
+
+  test("sets commit-failure outcome when all turns exhausted on hook failure", async () => {
+    const cwd = await makeGitRepo();
+    const runDir = join(cwd, ".pi-adversary", "runs", "test-run-commit-fail-capped");
+    await initRunDir(runDir);
+    await snapshotPlan(runDir, "# Test Plan Commit Capped\nDo a thing.");
+
+    // Pre-commit hook that always fails
+    const hookDir = join(cwd, ".git", "hooks");
+    writeFileSync(
+      join(hookDir, "pre-commit"),
+      `#!/bin/sh\necho "hook always fails"\nexit 1\n`,
+      { mode: 0o755 }
+    );
+
+    // Implement always creates a file
+    const implScript = join(cwd, "fake-impl-always-change.sh");
+    writeFileSync(
+      implScript,
+      `#!/bin/sh\necho "change-$(date +%s%N)" >> ${join(cwd, "changes.txt")}\nexit 0\n`,
+      { mode: 0o755 }
+    );
+
+    const summarizerScript = writeFakeSummarizer(cwd, "fake-summarizer-cc.sh");
+
+    const state: RunState = {
+      runDir,
+      planFile: join(runDir, "plan.txt"),
+      planTitle: "Test Plan Commit Capped",
+      branch: "adversary/test-branch",
+      baseBranch: "main",
+      startedAt: new Date().toISOString(),
+      turns: [],
+    };
+
+    const config: AdversaryConfig = {
+      implementCommandTemplate: implScript,
+      verifyCommandTemplate: "true",
+      summarizerCommandTemplate: summarizerScript,
+      implementTimeoutMs: 10000,
+      verifyTimeoutMs: 10000,
+      prTimeoutMs: 10000,
+      summarizerTimeoutMs: 10000,
+    };
+
+    await runLoop({ cwd, state, planContent: "# Test Plan Commit Capped\nDo a thing.", maxTurns: 2, threshold: 7, config });
+
+    expect(state.turns).toHaveLength(2);
+    expect(state.turns[0]?.outcome).toBe("commit-failure");
+    expect(state.turns[1]?.outcome).toBe("commit-failure");
+    expect(state.outcome).toBe("commit-failure");
+  });
 });
