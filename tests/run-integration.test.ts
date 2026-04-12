@@ -9,10 +9,11 @@
  *     must skip push/PR — no gh pr create call is made
  * (b) PrError from createPr must propagate (throw) out of runCommand
  */
-import { test, expect, describe } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
 import { runCommand } from "../src/cli/run.js";
 import { PrError } from "../src/pr/index.js";
 
@@ -30,10 +31,10 @@ async function makeGitRepo(): Promise<string> {
   await run("git", "init", "-b", "main");
   await run("git", "config", "user.email", "test@test.com");
   await run("git", "config", "user.name", "Test");
-  // Add .gitignore for .pi-adversary/ so run artifacts don't appear as untracked changes.
-  // This matches real-world usage (the preflight check warns if this is missing).
+  // Artifacts are now stored in XDG_STATE_HOME, not the repo. A minimal .gitignore is
+  // still needed to keep the working tree clean for preflight checks.
   const proc = Bun.spawn(
-    ["sh", "-c", "echo '.pi-adversary/' > .gitignore && echo 'init' > README.md && git add -A && git commit -m init"],
+    ["sh", "-c", "echo 'fake-*.sh' > .gitignore && echo 'init' > README.md && git add -A && git commit -m init"],
     { cwd: dir, stdout: "pipe", stderr: "pipe" }
   );
   await proc.exited;
@@ -170,7 +171,7 @@ exit 0
  * create untracked files in the working tree).
  */
 function writeFakeConfig(tmpDir: string, binDir: string, verifyScriptPath: string, summarizerScriptPath: string): string {
-  const configPath = join(tmpDir, ".pi-adversary.json");
+  const configPath = join(tmpDir, ".adversary.json");
   const config = {
     baseBranch: "main",
     implementCommandTemplate: `${join(binDir, "pi")} -p {promptFile}`,
@@ -228,6 +229,24 @@ async function runWithFakePath(
 }
 
 describe("runCommand integration", () => {
+  let xdgStateDir: string;
+  let savedXdgStateHome: string | undefined;
+
+  beforeEach(async () => {
+    xdgStateDir = await mkdtemp(join(tmpdir(), "adversary-xdg-state-"));
+    savedXdgStateHome = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = xdgStateDir;
+  });
+
+  afterEach(async () => {
+    if (savedXdgStateHome === undefined) {
+      delete process.env.XDG_STATE_HOME;
+    } else {
+      process.env.XDG_STATE_HOME = savedXdgStateHome;
+    }
+    await rm(xdgStateDir, { recursive: true, force: true });
+  });
+
   test("(a) implement-failure outcome skips push and PR creation", async () => {
     const repoDir = await makeGitRepo();
     const tmpBinDir = mkdtempSync(join(tmpdir(), "adversary-run-fakebin-"));
@@ -364,7 +383,7 @@ exit 0
       `#!/bin/sh\necho "glab not expected" >&2\nexit 1\n`
     );
 
-    const configPath = join(tmpBinDir, ".pi-adversary.json");
+    const configPath = join(tmpBinDir, ".adversary.json");
     const config = {
       baseBranch: "main",
       implementCommandTemplate: `${join(binDir, "pi")} -p {promptFile}`,
@@ -472,7 +491,7 @@ exit 0
       `#!/bin/sh\necho "glab not expected" >&2\nexit 1\n`
     );
 
-    const configPath = join(tmpBinDir, ".pi-adversary.json");
+    const configPath = join(tmpBinDir, ".adversary.json");
     const config = {
       baseBranch: "main",
       implementCommandTemplate: `${join(binDir, "pi")} -p {promptFile}`,

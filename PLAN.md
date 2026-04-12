@@ -16,7 +16,7 @@ Build a standalone **Bun CLI** that:
 8. commits after each turn with repo changes
 9. pushes once at the end
 10. creates a **draft PR/MR** via `gh` or `glab`
-11. stores rich artifacts under `.pi-adversary/runs/...`
+11. stores rich artifacts under `~/.local/state/adversary/<repo>-<hash>/runs/...`
 
 ---
 
@@ -91,7 +91,7 @@ Build a standalone **Bun CLI** that:
   - instruction to focus only on current threshold findings + plan
 
 ## Artifacts
-- Fixed artifact root: `.pi-adversary/runs/<timestamp>-<plan-slug>/`
+- Fixed artifact root: `~/.local/state/adversary/<repo>-<hash>/runs/<timestamp>-<plan-slug>/`
 - keep all runs forever in v1
 - full-fidelity artifacts, no redaction
 - plan may live anywhere on disk
@@ -127,8 +127,6 @@ Build a standalone **Bun CLI** that:
   - gh/glab as applicable
 - preflight auth/readiness for gh/glab
 - preflight verify structured-output contract support
-- `.pi-adversary/` not ignored:
-  - warn only, continue
 
 ---
 
@@ -239,7 +237,7 @@ Support template vars like:
 Suggested layout:
 
 ```text
-.pi-adversary/
+~/.local/state/adversary/<repo-name>-<hash>/
   runs/
     20260410-231500-add-json-verify-output/
       run-config.json
@@ -496,7 +494,7 @@ Write concise docs.
 - verify JSON contract
 - timeout behavior
 - warning about full-fidelity artifacts
-- warning that `.pi-adversary/` should ideally be gitignored
+- artifact storage location (XDG state dir)
 - exit behavior
 - examples for GitHub and GitLab
 

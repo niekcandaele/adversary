@@ -1,13 +1,12 @@
 import { join } from "node:path";
 import { timestampCompact, slugify } from "../utils/slugify.js";
 import { ensureDir, writeJsonFile, writeText } from "../utils/fs.js";
-
-const ARTIFACT_ROOT = ".pi-adversary/runs";
+import { getStateDir } from "../config/paths.js";
 
 export function buildRunDir(cwd: string, planSlug: string): string {
   const ts = timestampCompact();
   const slug = slugify(planSlug, 50);
-  return join(cwd, ARTIFACT_ROOT, `${ts}-${slug}`);
+  return join(getStateDir(cwd), "runs", `${ts}-${slug}`);
 }
 
 export async function initRunDir(runDir: string): Promise<void> {

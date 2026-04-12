@@ -8,10 +8,11 @@
  * - loop termination on clean verify
  * - turn summary writing
  */
-import { test, expect, describe } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
 import { runLoop } from "../src/loop/index.js";
 import type { RunState, AdversaryConfig } from "../src/types/index.js";
 import { buildRunDir, initRunDir, snapshotPlan } from "../src/artifacts/index.js";
@@ -26,7 +27,7 @@ async function makeGitRepo(): Promise<string> {
   await run("git", "config", "user.email", "test@test.com");
   await run("git", "config", "user.name", "Test");
   const proc = Bun.spawn(
-    ["sh", "-c", "echo '.pi-adversary/' > .gitignore && echo 'init' > README.md && git add -A && git commit -m init"],
+    ["sh", "-c", "echo 'fake-*.sh' > .gitignore && echo 'init' > README.md && git add -A && git commit -m init"],
     { cwd: dir, stdout: "pipe", stderr: "pipe" }
   );
   await proc.exited;
@@ -68,9 +69,27 @@ function writeFakeSummarizer(dir: string, name = "fake-summarizer.sh"): string {
 }
 
 describe("runLoop integration", () => {
+  let xdgStateDir: string;
+  let savedXdgStateHome: string | undefined;
+
+  beforeEach(async () => {
+    xdgStateDir = await mkdtemp(join(tmpdir(), "adversary-xdg-state-"));
+    savedXdgStateHome = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = xdgStateDir;
+  });
+
+  afterEach(async () => {
+    if (savedXdgStateHome === undefined) {
+      delete process.env.XDG_STATE_HOME;
+    } else {
+      process.env.XDG_STATE_HOME = savedXdgStateHome;
+    }
+    await rm(xdgStateDir, { recursive: true, force: true });
+  });
+
   test("terminates clean when verify reports zero findings", async () => {
     const cwd = await makeGitRepo();
-    const runDir = join(cwd, ".pi-adversary", "runs", "test-run");
+    const runDir = join(cwd, ".test-runs", "test-run");
     await initRunDir(runDir);
     await snapshotPlan(runDir, "# Test Plan\nDo a thing.");
 
@@ -114,7 +133,7 @@ describe("runLoop integration", () => {
 
   test("terminates capped when max turns reached with findings remaining", async () => {
     const cwd = await makeGitRepo();
-    const runDir = join(cwd, ".pi-adversary", "runs", "test-run-2");
+    const runDir = join(cwd, ".test-runs", "test-run-2");
     await initRunDir(runDir);
     await snapshotPlan(runDir, "# Test Plan 2\nDo another thing.");
 
@@ -165,7 +184,7 @@ describe("runLoop integration", () => {
 
   test("sets implement-failure outcome when implement command exits non-zero", async () => {
     const cwd = await makeGitRepo();
-    const runDir = join(cwd, ".pi-adversary", "runs", "test-run-impl-fail");
+    const runDir = join(cwd, ".test-runs", "test-run-impl-fail");
     await initRunDir(runDir);
     await snapshotPlan(runDir, "# Test Plan Impl Fail\nDo a thing.");
 
@@ -198,7 +217,7 @@ describe("runLoop integration", () => {
 
   test("sets verify-failure outcome when verify JSON is missing after verify command fails", async () => {
     const cwd = await makeGitRepo();
-    const runDir = join(cwd, ".pi-adversary", "runs", "test-run-verify-fail");
+    const runDir = join(cwd, ".test-runs", "test-run-verify-fail");
     await initRunDir(runDir);
     await snapshotPlan(runDir, "# Test Plan Verify Fail\nDo a thing.");
 
@@ -232,7 +251,7 @@ describe("runLoop integration", () => {
 
   test("sets verify-error outcome when verify reports status=error with exit code 0", async () => {
     const cwd = await makeGitRepo();
-    const runDir = join(cwd, ".pi-adversary", "runs", "test-run-error");
+    const runDir = join(cwd, ".test-runs", "test-run-error");
     await initRunDir(runDir);
     await snapshotPlan(runDir, "# Test Plan Error\nDo a thing.");
 
@@ -289,7 +308,7 @@ describe("runLoop integration", () => {
 
   test("sets summarizer-failure outcome when summarizer exits non-zero", async () => {
     const cwd = await makeGitRepo();
-    const runDir = join(cwd, ".pi-adversary", "runs", "test-run-summarizer-fail");
+    const runDir = join(cwd, ".test-runs", "test-run-summarizer-fail");
     await initRunDir(runDir);
     await snapshotPlan(runDir, "# Test Plan Summarizer Fail\nDo a thing.");
 
@@ -338,7 +357,7 @@ describe("runLoop integration", () => {
 
   test("sets summarizer-failure outcome when summarizer produces invalid JSON", async () => {
     const cwd = await makeGitRepo();
-    const runDir = join(cwd, ".pi-adversary", "runs", "test-run-summarizer-invalid");
+    const runDir = join(cwd, ".test-runs", "test-run-summarizer-invalid");
     await initRunDir(runDir);
     await snapshotPlan(runDir, "# Test Plan Summarizer Invalid\nDo a thing.");
 
@@ -387,7 +406,7 @@ describe("runLoop integration", () => {
 
   test("sets verify-blocked outcome when verify reports status=blocked", async () => {
     const cwd = await makeGitRepo();
-    const runDir = join(cwd, ".pi-adversary", "runs", "test-run-blocked");
+    const runDir = join(cwd, ".test-runs", "test-run-blocked");
     await initRunDir(runDir);
     await snapshotPlan(runDir, "# Test Plan Blocked\nDo a thing.");
 
@@ -444,7 +463,7 @@ describe("runLoop integration", () => {
 
   test("recovers from commit failure caused by pre-commit hook", async () => {
     const cwd = await makeGitRepo();
-    const runDir = join(cwd, ".pi-adversary", "runs", "test-run-commit-fail");
+    const runDir = join(mkdtempSync(join(tmpdir(), "adversary-rundir-cf-")), "test-run-commit-fail");
     await initRunDir(runDir);
     await snapshotPlan(runDir, "# Test Plan Commit Fail\nDo a thing.");
 
@@ -463,7 +482,7 @@ describe("runLoop integration", () => {
     const markerFile = join(cwd, "marker.txt");
     const implScript = join(cwd, "fake-impl-commit-fail.sh");
     // Add the script to .gitignore so git add -A won't stage it
-    writeFileSync(join(cwd, ".gitignore"), ".pi-adversary/\nfake-*.sh\n");
+    writeFileSync(join(cwd, ".gitignore"), "fake-*.sh\n");
     writeFileSync(
       implScript,
       `#!/bin/sh\nMARKER="HOOK_FAIL""_MARKER"\nif grep -q "$MARKER" "${markerFile}" 2>/dev/null; then\n  echo "FIXED" > "${markerFile}"\nelse\n  echo "$MARKER" > "${markerFile}"\nfi\nexit 0\n`,
@@ -508,7 +527,7 @@ describe("runLoop integration", () => {
 
   test("sets commit-failure outcome when all turns exhausted on hook failure", async () => {
     const cwd = await makeGitRepo();
-    const runDir = join(cwd, ".pi-adversary", "runs", "test-run-commit-fail-capped");
+    const runDir = join(mkdtempSync(join(tmpdir(), "adversary-rundir-cfc-")), "test-run-commit-fail-capped");
     await initRunDir(runDir);
     await snapshotPlan(runDir, "# Test Plan Commit Capped\nDo a thing.");
 

@@ -1,6 +1,6 @@
 import { test, expect, describe } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { generateFinalSummary, assemblePrBody } from "../src/summary/index.js";
 import type { RunState, PrSummaryOutput } from "../src/types/index.js";
@@ -210,5 +210,40 @@ describe("assemblePrBody", () => {
     expect(body).toContain("Minor Lint");
     expect(body).toContain("Unused import");
     expect(body).toContain("severity 2");
+  });
+
+  test("works without explicit cwd param (uses process.cwd() default)", () => {
+    const state = makeState("/tmp/test-run", { outcome: "clean" });
+    // Call assemblePrBody without the optional cwd argument
+    const body = assemblePrBody(state, 7, makeLlmOutput());
+    expect(typeof body).toBe("string");
+    expect(body.length).toBeGreaterThan(0);
+    expect(body).toContain("## Summary");
+  });
+
+  test("sanitizePath: runDir under homedir uses ~/... notation in PR body", () => {
+    const runDir = join(homedir(), ".local", "state", "adversary", "myrepo-abc12345", "runs", "20260410-test");
+    const state = makeState(runDir, { outcome: "clean" });
+    const body = assemblePrBody(state, 7, makeLlmOutput());
+    expect(body).toContain("~/");
+    expect(body).not.toContain(homedir() + "/");
+  });
+
+  test("displayPlanFile: planFile under cwd shows relative path in PR body", () => {
+    const cwd = "/projects/myrepo";
+    const planFile = "/projects/myrepo/plans/PLAN.md";
+    const state = makeState("/tmp/run", { planFile, outcome: "clean" });
+    const body = assemblePrBody(state, 7, makeLlmOutput(), cwd);
+    expect(body).toContain("plans/PLAN.md");
+    expect(body).not.toContain("/projects/myrepo/plans/PLAN.md");
+  });
+
+  test("displayPlanFile: planFile outside cwd but under homedir shows ~/... in PR body", () => {
+    const cwd = "/projects/myrepo";
+    const planFile = join(homedir(), "plans", "PLAN.md");
+    const state = makeState("/tmp/run", { planFile, outcome: "clean" });
+    const body = assemblePrBody(state, 7, makeLlmOutput(), cwd);
+    expect(body).toContain("~/plans/PLAN.md");
+    expect(body).not.toContain(homedir() + "/plans/PLAN.md");
   });
 });

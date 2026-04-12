@@ -17,13 +17,13 @@ describe("parseArgs", () => {
       "--turns", "6",
       "--severity-threshold", "5",
       "--base-branch", "develop",
-      "--config", ".pi-adversary.json",
+      "--config", ".adversary.json",
     ]);
     expect(options["plan"]).toBe("plan.md");
     expect(options["turns"]).toBe("6");
     expect(options["severity-threshold"]).toBe("5");
     expect(options["base-branch"]).toBe("develop");
-    expect(options["config"]).toBe(".pi-adversary.json");
+    expect(options["config"]).toBe(".adversary.json");
     expect(unknownFlags).toHaveLength(0);
   });
 
