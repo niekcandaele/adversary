@@ -38,7 +38,7 @@ export interface AdversaryConfig {
 export const DEFAULT_CONFIG: AdversaryConfig = {
   implementCommandTemplate: "pi -p @{promptFile}",
   verifyCommandTemplate:
-    'pi -p "/skill:verify --mode=report-only --format=json --output={verifyOutputFile}"',
+    'pi -p "/skill:verify --mode=report-only --format=json --output={verifyOutputFile} --plan-file={planFile}"',
   summarizerCommandTemplate: "pi -p @{promptFile}",
   implementTimeoutMs: 2700000,
   verifyTimeoutMs: 5400000,
