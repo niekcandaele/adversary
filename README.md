@@ -7,7 +7,7 @@ Bun CLI that runs an adversarial implement→verify loop on top of `pi`.
 `adversary` takes a plan file, creates a feature branch, and runs a loop where:
 
 1. An **implementer** agent implements (or improves) the code
-2. A **multi-skill verification pipeline** reviews the result — running reviewer, QA, tester, static-analysis, UX reviewer, and exerciser in parallel, then synthesizing deduplicated findings
+2. A **multi-skill verification pipeline** reviews the result — running reviewer, QA, tester, static-analysis, and UX reviewer in parallel, then the exerciser sequentially, before synthesizing deduplicated findings
 3. The loop continues until all findings above the severity threshold are resolved or max turns is reached
 4. A draft PR/MR is created at the end
 
@@ -195,7 +195,7 @@ Each turn, adversary orchestrates a multi-phase verification pipeline in TypeScr
 
 ### Phases
 
-```
+```text
 Phase 1 (parallel):  reviewer, qa, tester, static-analysis, ux-reviewer, plan-completeness
                       + any custom steps with phase: "parallel"
 Phase 2 (sequential): exerciser (receives phase 1 findings)

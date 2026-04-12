@@ -239,33 +239,32 @@ export async function runLoop(options: {
 
     process.stdout.write("\n");
 
-    const verifyStart = Date.now();
-
-    // 5a. Detect scope
-    const scope = await detectScope(cwd, state.baseBranch);
-
-    // 5b. Discovery (cached after turn 1)
-    const discovery = await runDiscovery({
-      cwd,
-      scope,
-      config,
-      runDir: state.runDir,
-      turnDir,
-      env: options.env,
-    });
-
-    // 5c. Browser automation check (turn 1 only)
-    if (turn === 1) {
-      await checkBrowserAutomation(config.browserAutomation, discovery);
-    }
-
-    // 5d. Read cached project skills (populated by runDiscovery on turn 1,
-    //     avoids redundant find commands on every subsequent turn)
-    const projectSkills = await getCachedProjectSkills(state.runDir);
-
-    // 5e. Run verification pipeline
     let report: VerifyReport;
+    const verifyStart = Date.now();
     try {
+      // 5a. Detect scope
+      const scope = await detectScope(cwd, state.baseBranch);
+
+      // 5b. Discovery (cached after turn 1)
+      const discovery = await runDiscovery({
+        cwd,
+        scope,
+        config,
+        runDir: state.runDir,
+        turnDir,
+        env: options.env,
+      });
+
+      // 5c. Browser automation check (turn 1 only)
+      if (turn === 1) {
+        await checkBrowserAutomation(config.browserAutomation, discovery);
+      }
+
+      // 5d. Read cached project skills (populated by runDiscovery on turn 1,
+      //     avoids redundant find commands on every subsequent turn)
+      const projectSkills = await getCachedProjectSkills(state.runDir);
+
+      // 5e. Run verification pipeline
       report = await runVerification({
         cwd,
         turnDir,

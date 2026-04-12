@@ -77,7 +77,7 @@ done
 
 if [ -z "$PROMPT_FILE" ]; then
   # No prompt file - just output skill JSON
-  echo '{"status":"ok","findings":[]}'
+  echo '{"status":"completed","findings":[]}'
   exit 0
 fi
 
@@ -96,7 +96,7 @@ if echo "$CONTENT" | grep -q '"testCommand"\\|toolchain discovery'; then
 fi
 
 # Default: skill prompt - output skill JSON (no findings; synthesis will include them)
-echo '{"status":"ok","findings":[]}'
+echo '{"status":"completed","findings":[]}'
 exit 0
 `,
     { mode: 0o755 }

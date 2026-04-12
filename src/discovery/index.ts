@@ -80,8 +80,10 @@ export async function runDiscovery(options: {
   // Parse output
   const stdoutText = await Bun.file(stdoutPath).text();
   let discovery: ToolchainDiscovery;
+  let parsedSuccessfully = false;
   try {
     discovery = extractJson(stdoutText) as ToolchainDiscovery;
+    parsedSuccessfully = true;
   } catch {
     // Fallback: return empty discovery if parse fails
     process.stderr.write(
@@ -100,8 +102,10 @@ export async function runDiscovery(options: {
   // Validate and normalize
   discovery = normalizeDiscovery(discovery);
 
-  // Cache for future turns
-  await writeJsonFile(cachePath, discovery);
+  // Only cache successful discovery — don't poison the cache with empty fallbacks
+  if (parsedSuccessfully) {
+    await writeJsonFile(cachePath, discovery);
+  }
 
   return discovery;
 }

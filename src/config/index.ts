@@ -44,6 +44,11 @@ function parseConfigLayer(raw: Record<string, unknown>): Partial<AdversaryConfig
       if (typeof s.name !== "string") {
         throw new Error(`customVerificationSteps[${i}].name must be a string`);
       }
+      if (!/^[A-Za-z0-9._-]+$/.test(s.name)) {
+        throw new Error(
+          `customVerificationSteps[${i}].name contains invalid characters (only alphanumeric, dots, hyphens, underscores allowed)`
+        );
+      }
       if (typeof s.commandTemplate !== "string") {
         throw new Error(`customVerificationSteps[${i}].commandTemplate must be a string`);
       }

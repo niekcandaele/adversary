@@ -23,7 +23,7 @@ export async function parseVerifyOutput(verifyJsonPath: string): Promise<VerifyR
   if (report.schemaVersion !== 1) {
     throw new VerifyParseError(`Unexpected schemaVersion: ${report.schemaVersion}`);
   }
-  if (!["ok", "blocked", "error"].includes(report.status as string)) {
+  if (!["ok", "blocked", "error", "skipped"].includes(report.status as string)) {
     throw new VerifyParseError(`Invalid status: ${report.status}`);
   }
   if (!Array.isArray(report.findings)) {

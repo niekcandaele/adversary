@@ -453,7 +453,7 @@ async function runSynthesis(options: {
 
   let template: string;
   try {
-    template = await loadSkillTemplate("synthesis");
+    template = await loadSkillTemplate("synthesis", config.skillOverrides?.synthesis);
   } catch (e) {
     process.stderr.write(`  Warning: failed to load synthesis template: ${e}\n`);
     return synthesizeFallback(allResults);
