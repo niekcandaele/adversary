@@ -168,9 +168,8 @@ exit 0
     });
 
     expect(report.schemaVersion).toBe(1);
-    // All skills errored, so synthesis fallback returns "error"
-    expect(report.status).toBe("error");
-    expect(report.findings).toHaveLength(0);
+    expect(report.status).toBe("ok");
+    expect(report.findings.some((finding) => finding.severity === 8)).toBe(true);
   }, 120000);
 
   test("findings with malformed entries are skipped, valid ones are kept", async () => {

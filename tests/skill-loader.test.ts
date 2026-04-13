@@ -51,9 +51,9 @@ describe("loadSkillTemplate", () => {
     expect(template).toContain("{planContent}");
   });
 
-  test("synthesis template has skillFindings placeholder", async () => {
+  test("synthesis template has stepsJson placeholder", async () => {
     const template = await loadSkillTemplate("synthesis");
-    expect(template).toContain("{skillFindings}");
+    expect(template).toContain("{stepsJson}");
   });
 
   test("all skill templates have JSON output format section", async () => {

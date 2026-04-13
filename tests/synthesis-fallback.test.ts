@@ -22,13 +22,13 @@ describe("synthesizeFallback", () => {
     expect(report.status).toBe("ok");
   });
 
-  test("returns error status when any skill has error", () => {
+  test("keeps ok status when a step error is represented as findings", () => {
     const results: SkillResult[] = [
       { skill: "reviewer", exitCode: 0, durationMs: 100, findings: [], status: "completed" },
-      { skill: "qa", exitCode: 1, durationMs: 0, findings: [], status: "error" },
+      { skill: "qa", exitCode: 1, durationMs: 0, findings: [{ title: "qa step failed", severity: 8, description: "meta", sources: ["qa"] }], status: "error" },
     ];
     const report = synthesizeFallback(results);
-    expect(report.status).toBe("error");
+    expect(report.status).toBe("ok");
   });
 
   test("concatenates all findings from all skills", () => {
@@ -153,12 +153,12 @@ describe("synthesizeFallback", () => {
     expect(report.findings[2]?.severity).toBe(2);
   });
 
-  test("handles timeout status as error-like", () => {
+  test("handles timeout status as a finding-only condition", () => {
     const results: SkillResult[] = [
-      { skill: "reviewer", exitCode: 124, durationMs: 90000, findings: [], status: "timeout" },
+      { skill: "reviewer", exitCode: 124, durationMs: 90000, findings: [{ title: "reviewer step failed", severity: 8, description: "timeout", sources: ["reviewer"] }], status: "timeout" },
     ];
     const report = synthesizeFallback(results);
-    expect(report.status).toBe("error");
+    expect(report.status).toBe("ok");
   });
 
   // VI-15: location-less finding dedup

@@ -1,330 +1,355 @@
 import { join } from "node:path";
 import type {
   AdversaryConfig,
+  CustomVerificationStep,
+  DeterministicStepKind,
   SkillResult,
   ToolchainDiscovery,
   VerifyFinding,
 } from "../types/index.js";
 import { runStep } from "../runner/index.js";
-import { ensureDir, writeText, writeJsonFile } from "../utils/fs.js";
+import { writeJsonFile, writeText } from "../utils/fs.js";
 import { interpolate } from "../utils/slugify.js";
 import { loadSkillTemplate } from "../prompts/skills/loader.js";
 import { validateRawFindings } from "./findings.js";
 import { extractJson } from "../utils/json.js";
+import { ensureStepDir, writeStepContextFile, writeTruncatedHelperArtifacts } from "./steps.js";
 
-interface CommandSpec {
+interface PlannedDeterministicStep {
+  name: string;
   label: string;
+  kind: DeterministicStepKind;
+  commandType: DeterministicStepKind;
   command: string;
-  commandType: string;
   timeoutMs: number;
+  source: "configured" | "discovered";
 }
 
-/**
- * Build the list of deterministic command specs from discovery.
- * Null/empty commands are skipped.
- */
+const DETERMINISTIC_KIND_ORDER: DeterministicStepKind[] = ["test", "build", "lint", "typecheck"];
+
 export function buildCommandSpecs(
   discovery: ToolchainDiscovery,
   config: AdversaryConfig
-): CommandSpec[] {
-  const specs: CommandSpec[] = [];
-
-  if (discovery.testCommand) {
-    specs.push({
-      label: "det-test",
-      command: discovery.testCommand,
-      commandType: "test",
-      timeoutMs: config.testTimeoutMs,
-    });
-  }
-
-  if (discovery.buildCommand) {
-    specs.push({
-      label: "det-build",
-      command: discovery.buildCommand,
-      commandType: "build",
-      timeoutMs: config.verifyTimeoutMs,
-    });
-  }
-
-  for (let i = 0; i < discovery.lintCommands.length; i++) {
-    const cmd = discovery.lintCommands[i];
-    if (!cmd) continue;
-    const label = discovery.lintCommands.length === 1 ? "det-lint" : `det-lint-${i}`;
-    specs.push({
-      label,
-      command: cmd,
-      commandType: "lint",
-      timeoutMs: config.verifyTimeoutMs,
-    });
-  }
-
-  for (let i = 0; i < discovery.typeCheckCommands.length; i++) {
-    const cmd = discovery.typeCheckCommands[i];
-    if (!cmd) continue;
-    const label = discovery.typeCheckCommands.length === 1 ? "det-typecheck" : `det-typecheck-${i}`;
-    specs.push({
-      label,
-      command: cmd,
-      commandType: "typecheck",
-      timeoutMs: config.verifyTimeoutMs,
-    });
-  }
-
-  return specs;
+): PlannedDeterministicStep[] {
+  return buildDeterministicSteps(discovery, config);
 }
 
-/**
- * Run all deterministic commands (test, build, lint, typecheck) in parallel.
- * Each command is spawned via sh -c to handle shell operators.
- * Returns one SkillResult per command.
- */
+export function buildDeterministicSteps(
+  discovery: ToolchainDiscovery,
+  config: AdversaryConfig
+): PlannedDeterministicStep[] {
+  const configuredByKind = new Map<DeterministicStepKind, CustomVerificationStep[]>();
+  for (const kind of DETERMINISTIC_KIND_ORDER) {
+    configuredByKind.set(kind, []);
+  }
+
+  for (const step of config.customVerificationSteps) {
+    if (step.phase !== "deterministic" || !step.kind) continue;
+    configuredByKind.get(step.kind)?.push(step);
+  }
+
+  const planned: PlannedDeterministicStep[] = [];
+  for (const kind of DETERMINISTIC_KIND_ORDER) {
+    const configured = configuredByKind.get(kind) ?? [];
+    if (configured.length > 0) {
+      planned.push(...configured.map((step) => ({
+        name: step.name,
+        label: step.name,
+        kind,
+        commandType: kind,
+        command: step.commandTemplate,
+        timeoutMs: step.timeoutMs ?? (kind === "test" ? config.testTimeoutMs : config.verifyTimeoutMs),
+        source: "configured" as const,
+      })));
+      continue;
+    }
+
+    planned.push(...buildDiscoveredFallbackSteps(kind, discovery, config));
+  }
+
+  return planned;
+}
+
+function buildDiscoveredFallbackSteps(
+  kind: DeterministicStepKind,
+  discovery: ToolchainDiscovery,
+  config: AdversaryConfig
+): PlannedDeterministicStep[] {
+  if (kind === "test") {
+    return discovery.testCommand
+      ? [{
+          name: "discovered-test",
+          label: "discovered-test",
+          kind,
+          commandType: kind,
+          command: discovery.testCommand,
+          timeoutMs: config.testTimeoutMs,
+          source: "discovered",
+        }]
+      : [];
+  }
+
+  if (kind === "build") {
+    return discovery.buildCommand
+      ? [{
+          name: "discovered-build",
+          label: "discovered-build",
+          kind,
+          commandType: kind,
+          command: discovery.buildCommand,
+          timeoutMs: config.verifyTimeoutMs,
+          source: "discovered",
+        }]
+      : [];
+  }
+
+  const commands = kind === "lint" ? discovery.lintCommands : discovery.typeCheckCommands;
+  return commands
+    .filter((command): command is string => Boolean(command))
+    .map((command, index) => {
+      const name = commands.filter(Boolean).length === 1
+        ? `discovered-${kind}`
+        : `discovered-${kind}-${index}`;
+      return {
+        name,
+        label: name,
+        kind,
+        commandType: kind,
+        command,
+        timeoutMs: config.verifyTimeoutMs,
+        source: "discovered" as const,
+      };
+    });
+}
+
 export async function runDeterministicCommands(options: {
   discovery: ToolchainDiscovery;
   cwd: string;
-  skillsDir: string;
+  verifyDir?: string;
+  skillsDir?: string;
   config: AdversaryConfig;
-  scopedFiles: string;
+  branchContextFile?: string;
+  planFile?: string;
+  planContent?: string;
+  scopedFiles?: string;
   env?: NodeJS.ProcessEnv;
 }): Promise<SkillResult[]> {
-  const { discovery, cwd, skillsDir, config, scopedFiles, env } = options;
+  const verifyDir = options.verifyDir ?? join(options.skillsDir ?? join(options.cwd, "verify"), "..");
+  const branchContextFile = options.branchContextFile ?? join(verifyDir, "branch-context.txt");
+  const planFile = options.planFile ?? join(verifyDir, "plan.txt");
+  const planContent = options.planContent ?? "";
+  const { discovery, cwd, config, env } = options;
+  const steps = buildDeterministicSteps(discovery, config);
+  const results: SkillResult[] = [];
 
-  const specs = buildCommandSpecs(discovery, config);
-
-  if (specs.length === 0) {
-    return [];
+  for (const step of steps) {
+    results.push(await runSingleDeterministicStep({
+      step,
+      cwd,
+      verifyDir,
+      config,
+      branchContextFile,
+      planFile,
+      planContent,
+      env,
+    }));
   }
 
-  const promises = specs.map((spec) =>
-    runSingleDeterministicCommand({ spec, cwd, skillsDir, config, scopedFiles, env })
-  );
-
-  const settled = await Promise.allSettled(promises);
-
-  return settled.map((r, i) => {
-    const spec = specs[i]!;
-    if (r.status === "fulfilled") {
-      return r.value;
-    } else {
-      process.stderr.write(`  Warning: deterministic command "${spec.label}" threw: ${r.reason}\n`);
-      return {
-        skill: spec.label,
-        exitCode: 1,
-        durationMs: 0,
-        findings: [],
-        status: "error" as const,
-      };
-    }
-  });
+  return results;
 }
 
-async function runSingleDeterministicCommand(options: {
-  spec: CommandSpec;
+async function runSingleDeterministicStep(options: {
+  step: PlannedDeterministicStep;
   cwd: string;
-  skillsDir: string;
+  verifyDir: string;
   config: AdversaryConfig;
-  scopedFiles: string;
+  branchContextFile: string;
+  planFile: string;
+  planContent: string;
   env?: NodeJS.ProcessEnv;
 }): Promise<SkillResult> {
-  const { spec, cwd, skillsDir, config, scopedFiles, env } = options;
+  const { step, cwd, verifyDir, config, branchContextFile, planFile, planContent, env } = options;
+  const stepDir = await ensureStepDir(verifyDir, step.name);
+  const contextFile = await writeStepContextFile({
+    stepDir,
+    branchContextFile,
+    planFile,
+    planContent,
+    extraSections: [
+      { title: "Deterministic step", body: `Name: ${step.name}\nKind: ${step.kind}\nSource: ${step.source}` },
+      { title: "Command", body: step.command },
+    ],
+  });
 
-  await ensureDir(skillsDir);
+  const command = step.source === "configured"
+    ? interpolate(step.command, { cwd, contextFile, planFile })
+    : step.command;
 
-  const stdoutPath = join(skillsDir, `${spec.label}.stdout.log`);
-  const stderrPath = join(skillsDir, `${spec.label}.stderr.log`);
+  const stdoutPath = join(stepDir, "stdout.log");
+  const stderrPath = join(stepDir, "stderr.log");
 
-  // Spawn via ["sh", "-c", command] to correctly handle shell operators (&&, |, ;, etc.).
-  // Using rawArgv bypasses parseCommand entirely, which would misparse quoted strings
-  // embedded in the command or split compound commands incorrectly.
   const stepResult = await runStep({
-    command: spec.command,
-    rawArgv: ["sh", "-c", spec.command],
+    command,
+    rawArgv: ["sh", "-c", command],
     cwd,
     stdoutPath,
     stderrPath,
-    timeoutMs: spec.timeoutMs,
-    label: spec.label,
+    timeoutMs: step.timeoutMs,
+    label: step.name,
     env,
   });
 
-  if (stepResult.timedOut) {
-    const finding: VerifyFinding = {
-      title: `${spec.commandType} command timed out`,
-      severity: 8,
-      description: `The ${spec.commandType} command timed out after ${Math.round(spec.timeoutMs / 1000)}s: \`${spec.command}\``,
-      sources: [spec.label],
-    };
-    await writeJsonFile(join(skillsDir, `${spec.label}.output.json`), {
-      skill: spec.label,
-      status: "timeout",
-      findings: [finding],
-    });
-    process.stdout.write(
-      `  [verify] ${spec.label} TIMED OUT (1 finding)\n`
-    );
-    return {
-      skill: spec.label,
-      exitCode: stepResult.exitCode,
-      durationMs: stepResult.durationMs,
-      findings: [finding],
-      status: "timeout",
-    };
-  }
-
-  if (stepResult.exitCode === 0) {
-    await writeJsonFile(join(skillsDir, `${spec.label}.output.json`), {
-      skill: spec.label,
-      status: "completed",
-      findings: [],
-    });
-    process.stdout.write(
-      `  [verify] ${spec.label} completed (${Math.round(stepResult.durationMs / 1000)}s, 0 findings, status: completed)\n`
-    );
-    return {
-      skill: spec.label,
-      exitCode: 0,
-      durationMs: stepResult.durationMs,
-      findings: [],
-      status: "completed",
-    };
-  }
-
-  // Non-zero exit — analyze with LLM
   const stdoutText = await Bun.file(stdoutPath).text();
   const stderrText = await Bun.file(stderrPath).text();
-  const combined = stdoutText + stderrText;
+  const helperArtifacts = await writeTruncatedHelperArtifacts({ stepDir, stdoutText, stderrText });
 
-  const findings = await analyzeFailure({
-    commandType: spec.commandType,
-    command: spec.command,
-    output: combined,
-    scopedFiles,
-    skillsDir,
-    label: spec.label,
-    config,
-    cwd,
-    env,
-  });
+  let findings: VerifyFinding[] = [];
+  let status: SkillResult["status"] = "completed";
 
-  await writeJsonFile(join(skillsDir, `${spec.label}.output.json`), {
-    skill: spec.label,
-    status: "completed",
+  if (stepResult.timedOut) {
+    findings = [metaFinding({
+      title: `${step.kind} step timed out`,
+      description: `Deterministic ${step.kind} step \`${step.name}\` timed out after ${Math.round(step.timeoutMs / 1000)}s while running \`${command}\`. See artifacts in ${stepDir}.`,
+      source: step.name,
+    })];
+    status = "timeout";
+  } else if (stepResult.exitCode !== 0) {
+    findings = await analyzeDeterministicFailure({
+      step,
+      command,
+      stepDir,
+      helperArtifacts,
+      stdoutPath,
+      stderrPath,
+      config,
+      cwd,
+      contextFile,
+      env,
+    });
+  }
+
+  const output = {
+    skill: step.name,
+    status,
     findings,
-  });
-
-  const durationSecs = Math.round(stepResult.durationMs / 1000);
-  process.stdout.write(
-    `  [verify] ${spec.label} completed (${durationSecs}s, ${findings.length} finding${findings.length !== 1 ? "s" : ""}, status: completed)\n`
-  );
+    step: {
+      name: step.name,
+      kind: step.kind,
+      source: step.source,
+      command,
+      exitCode: stepResult.exitCode,
+      timedOut: stepResult.timedOut,
+      durationMs: stepResult.durationMs,
+      artifactDir: stepDir,
+    },
+  };
+  await writeJsonFile(join(stepDir, "output.json"), output);
 
   return {
-    skill: spec.label,
+    skill: step.name,
     exitCode: stepResult.exitCode,
     durationMs: stepResult.durationMs,
     findings,
-    status: "completed",
+    status,
+    artifactDir: stepDir,
   };
 }
 
-const OUTPUT_TAIL_LINES = 500;
-
-/**
- * Analyze a failed command's output via the command-analyzer LLM skill.
- */
-async function analyzeFailure(options: {
-  commandType: string;
+async function analyzeDeterministicFailure(options: {
+  step: PlannedDeterministicStep;
   command: string;
-  output: string;
-  scopedFiles: string;
-  skillsDir: string;
-  label: string;
+  stepDir: string;
+  helperArtifacts: { stdoutTruncatedPath: string; stderrTruncatedPath: string };
+  stdoutPath: string;
+  stderrPath: string;
   config: AdversaryConfig;
   cwd: string;
+  contextFile: string;
   env?: NodeJS.ProcessEnv;
 }): Promise<VerifyFinding[]> {
-  const { commandType, command, output, scopedFiles, skillsDir, label, config, cwd, env } = options;
-
-  // Truncate output to tail lines
-  const lines = output.split("\n");
-  const tail = lines.slice(-OUTPUT_TAIL_LINES).join("\n");
+  const { step, command, stepDir, helperArtifacts, stdoutPath, stderrPath, config, cwd, contextFile, env } = options;
 
   let template: string;
   try {
     template = await loadSkillTemplate("command-analyzer");
-  } catch (e) {
-    process.stderr.write(`  Warning: failed to load command-analyzer template: ${e}\n`);
-    return fallbackFinding(commandType, command, label);
+  } catch {
+    return [metaFinding({
+      title: `${step.kind} step failed`,
+      description: `Deterministic ${step.kind} step \`${step.name}\` failed and the command analyzer prompt could not be loaded. Command: \`${command}\`.`,
+      source: step.name,
+    })];
   }
 
-  // Interpolate template variables
   let prompt = template;
-  const vars: Record<string, string> = {
-    commandType,
+  for (const [key, value] of Object.entries({
+    stepName: step.name,
+    commandType: step.kind,
     command,
-    output: tail,
-    scopedFiles,
-  };
-  for (const [key, value] of Object.entries(vars)) {
+    contextFile,
+    stdoutPath,
+    stderrPath,
+    stdoutSnippetPath: helperArtifacts.stdoutTruncatedPath,
+    stderrSnippetPath: helperArtifacts.stderrTruncatedPath,
+  })) {
     prompt = prompt.replace(new RegExp(`\\{${key}\\}`, "g"), () => value);
   }
 
-  const promptPath = join(skillsDir, `${label}.analyzer.prompt.md`);
+  const promptPath = join(stepDir, "analysis.prompt.md");
   await writeText(promptPath, prompt);
 
-  const analyzerVars: Record<string, string> = { promptFile: promptPath };
-  const analyzerCommand = interpolate(config.verifyCommandTemplate, analyzerVars);
-  const analyzerStdoutPath = join(skillsDir, `${label}.analyzer.stdout.log`);
-  const analyzerStderrPath = join(skillsDir, `${label}.analyzer.stderr.log`);
+  const analyzerCommand = interpolate(config.verifyCommandTemplate, { promptFile: promptPath });
+  const analysisStdoutPath = join(stepDir, "analysis.stdout.log");
+  const analysisStderrPath = join(stepDir, "analysis.stderr.log");
 
-  let analyzerResult;
   try {
-    analyzerResult = await runStep({
+    const analyzerResult = await runStep({
       command: analyzerCommand,
       cwd,
-      stdoutPath: analyzerStdoutPath,
-      stderrPath: analyzerStderrPath,
+      stdoutPath: analysisStdoutPath,
+      stderrPath: analysisStderrPath,
       timeoutMs: config.verifyTimeoutMs,
-      label: `${label}-analyzer`,
+      label: `${step.name}-analysis`,
       env,
     });
-  } catch (e) {
-    process.stderr.write(`  Warning: command-analyzer step threw for "${label}": ${e}\n`);
-    return fallbackFinding(commandType, command, label);
-  }
 
-  if (!analyzerResult.success && !analyzerResult.timedOut) {
-    process.stderr.write(
-      `  Warning: command-analyzer exited non-zero (${analyzerResult.exitCode}) for "${label}" — using fallback finding\n`
-    );
-    return fallbackFinding(commandType, command, label);
-  }
+    if (analyzerResult.timedOut || analyzerResult.exitCode !== 0) {
+      return [metaFinding({
+        title: `${step.kind} step failed`,
+        description: `Deterministic ${step.kind} step \`${step.name}\` failed and the command analyzer also failed. Command: \`${command}\`.`,
+        source: step.name,
+      })];
+    }
 
-  const analyzerStdout = await Bun.file(analyzerStdoutPath).text();
-
-  try {
+    const analyzerStdout = await Bun.file(analysisStdoutPath).text();
     const parsed = extractJson(analyzerStdout) as Record<string, unknown>;
     const rawFindings = Array.isArray(parsed.findings) ? parsed.findings : [];
-    const findings = validateRawFindings(rawFindings, label);
-    if (findings.length > 0) {
-      return findings;
-    }
-    // Analyzer returned no findings despite non-zero exit — use fallback
-    return fallbackFinding(commandType, command, label);
+    const findings = validateRawFindings(rawFindings, step.name).map((finding) => ({
+      ...finding,
+      severity: 8,
+      sources: [step.name],
+    }));
+
+    return findings.length > 0
+      ? findings
+      : [metaFinding({
+          title: `${step.kind} step failed`,
+          description: `Deterministic ${step.kind} step \`${step.name}\` failed with command \`${command}\`. Analyzer returned no findings; inspect ${stepDir}.`,
+          source: step.name,
+        })];
   } catch {
-    process.stderr.write(
-      `  Warning: could not parse command-analyzer output for "${label}" — using fallback finding\n`
-    );
-    return fallbackFinding(commandType, command, label);
+    return [metaFinding({
+      title: `${step.kind} step failed`,
+      description: `Deterministic ${step.kind} step \`${step.name}\` failed and its analyzer output could not be processed. Command: \`${command}\`.`,
+      source: step.name,
+    })];
   }
 }
 
-function fallbackFinding(commandType: string, command: string, label: string): VerifyFinding[] {
-  return [
-    {
-      title: `${commandType} command failed`,
-      severity: commandType === "test" || commandType === "build" ? 8 : 6,
-      description: `The ${commandType} command exited with a non-zero exit code: \`${command}\``,
-      sources: [label],
-    },
-  ];
+function metaFinding(options: { title: string; description: string; source: string }): VerifyFinding {
+  return {
+    title: options.title,
+    severity: 8,
+    description: options.description,
+    sources: [options.source],
+  };
 }

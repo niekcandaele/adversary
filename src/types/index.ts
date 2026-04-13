@@ -9,11 +9,15 @@ export type BuiltinSkillName =
 
 export type BrowserAutomationMode = "warn" | "require" | "skip";
 
+export type VerificationStepPhase = "parallel-review" | "deterministic";
+export type DeterministicStepKind = "test" | "build" | "lint" | "typecheck";
+
 export interface CustomVerificationStep {
   name: string;
   commandTemplate: string;
-  phase: "parallel" | "sequential";
+  phase: VerificationStepPhase;
   timeoutMs?: number;
+  kind?: DeterministicStepKind;
 }
 
 export interface SkillOverride {
@@ -28,6 +32,7 @@ export interface SkillResult {
   durationMs: number;
   findings: VerifyFinding[];
   status: "completed" | "error" | "timeout";
+  artifactDir?: string;
 }
 
 export interface VerifyScope {

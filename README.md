@@ -7,7 +7,7 @@ Bun CLI that runs an adversarial implement→verify loop on top of `pi`.
 `adversary` takes a plan file, creates a feature branch, and runs a loop where:
 
 1. An **implementer** agent implements (or improves) the code
-2. A **multi-skill verification pipeline** reviews the result — running reviewer, QA, tester, static-analysis, and UX reviewer in parallel, then the exerciser sequentially, before synthesizing deduplicated findings
+2. A **branch-wide verification pipeline** reviews the result — running reviewer, QA, UX reviewer, plan-completeness, and any configured parallel-review tools first, then deterministic checks sequentially, then the exerciser, before synthesizing deduplicated findings
 3. The loop continues until all findings above the severity threshold are resolved or max turns is reached
 4. A draft PR/MR is created at the end
 
@@ -111,21 +111,29 @@ Add custom verification steps that run alongside the built-in skills:
 {
   "customVerificationSteps": [
     {
-      "name": "security-scan",
-      "commandTemplate": "my-scanner --context {contextFile}",
-      "phase": "parallel",
+      "name": "codex-review",
+      "commandTemplate": "codex exec --full-auto < {contextFile}",
+      "phase": "parallel-review",
       "timeoutMs": 300000
+    },
+    {
+      "name": "repo-tests",
+      "commandTemplate": "bun test",
+      "phase": "deterministic",
+      "kind": "test",
+      "timeoutMs": 600000
     }
   ]
 }
 ```
 
-- `phase: "parallel"` runs alongside built-in phase 1 skills
-- `phase: "sequential"` runs after the exerciser (receives phase 1 findings)
-- `{contextFile}` is a temp file containing scope context, plan content, and discovery data
-- `timeoutMs` is optional (defaults to `verifyTimeoutMs`)
+- `phase: "parallel-review"` runs in the branch-wide parallel review phase
+- `phase: "deterministic"` runs sequentially and requires `kind: "test" | "build" | "lint" | "typecheck"`
+- `{contextFile}` points at a branch context package containing plan and branch metadata
+- `{planFile}` and `{cwd}` are also available to custom steps
+- `timeoutMs` is optional (defaults to `verifyTimeoutMs`, except discovered test fallback uses `testTimeoutMs`)
 
-Custom steps must output JSON matching the verify findings schema (see [Verify JSON Contract](#verify-json-contract)).
+Parallel-review tools may emit plain text; adversary analyzes their output into normalized findings.
 
 ### `skillOverrides`
 
@@ -196,12 +204,13 @@ Each turn, adversary orchestrates a multi-phase verification pipeline in TypeScr
 ### Phases
 
 ```text
-Phase 1 (parallel):  reviewer, qa, tester, static-analysis, ux-reviewer, plan-completeness
-                      + any custom steps with phase: "parallel"
-Phase 2 (sequential): exerciser (receives phase 1 findings)
-                      + any custom steps with phase: "sequential"
-Phase 3 (sequential): synthesis — LLM deduplicates and merges findings into final JSON
-                      (falls back to deterministic dedup if synthesis fails)
+Phase 1 (parallel-review): reviewer, qa, ux-reviewer, plan-completeness
+                           + any custom steps with phase: "parallel-review"
+Phase 2 (deterministic):   configured deterministic steps first by kind (test, build, lint, typecheck)
+                           + discovered fallback commands only for uncovered kinds
+Phase 3 (sequential):      exerciser
+Phase 4 (sequential):      synthesis — LLM deduplicates and merges findings into final JSON
+                           (falls back deterministically if synthesis fails)
 ```
 
 ### Built-in skills
@@ -210,8 +219,7 @@ Phase 3 (sequential): synthesis — LLM deduplicates and merges findings into fi
 |-------|---------|
 | `reviewer` | Design, architecture, coherence, hardening, security |
 | `qa` | Test coverage quality and adequacy |
-| `tester` | Run test suite, report pass/fail |
-| `static-analysis` | Run linters and type-checkers |
+| deterministic steps | Sequential test/build/lint/typecheck checks, from config or discovery fallback |
 | `ux-reviewer` | CLI output, error messages, user-facing strings |
 | `exerciser` | End-to-end smoke test — starts the app and exercises the feature |
 | `plan-completeness` | Checks implementation against the plan |
@@ -302,26 +310,30 @@ Structure:
         verify/
           scope.json
           discovery.json
-          skills/
-            reviewer.prompt.md
-            reviewer.output.json
-            reviewer.stderr.log
-            qa.prompt.md
-            qa.output.json
-            tester.prompt.md
-            tester.output.json
-            static-analysis.prompt.md
-            static-analysis.output.json
-            ux-reviewer.prompt.md
-            ux-reviewer.output.json
-            plan-completeness.prompt.md
-            plan-completeness.output.json
-          exerciser.prompt.md
-          exerciser.output.json
-          exerciser.stderr.log
-          synthesis.prompt.md
-          synthesis.output.json
-          synthesis.stderr.log
+          steps/
+            reviewer/
+              prompt.md
+              stdout.log
+              stderr.log
+              output.json
+            qa/
+              ...
+            discovered-test/
+              stdout.log
+              stderr.log
+              stdout.truncated.log
+              stderr.truncated.log
+              analysis.prompt.md
+              analysis.stdout.log
+              analysis.stderr.log
+              output.json
+            exerciser/
+              ...
+          synthesis/
+            prompt.md
+            stdout.log
+            stderr.log
+            output.json
       turn-2/
         ...
 ```

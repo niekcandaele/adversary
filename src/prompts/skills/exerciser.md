@@ -51,7 +51,7 @@ Use `startCommand` from the toolchain discovery above. If unavailable, discover 
 
 ### 3. Exercise the Feature
 
-Use the scope to determine WHAT to exercise. Focus on what changed.
+Use the scope metadata as supporting context for what changed, but exercise the branch implementation end to end.
 
 ### 4. Verify Data Flows End-to-End
 

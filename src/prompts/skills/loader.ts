@@ -9,6 +9,7 @@ import planCompletenessMd from "./plan-completeness.md" with { type: "text" };
 import qaMd from "./qa.md" with { type: "text" };
 import reviewerMd from "./reviewer.md" with { type: "text" };
 import synthesisMd from "./synthesis.md" with { type: "text" };
+import toolOutputAnalyzerMd from "./tool-output-analyzer.md" with { type: "text" };
 import uxReviewerMd from "./ux-reviewer.md" with { type: "text" };
 
 const BUILTIN_SKILLS: Record<string, string> = {
@@ -19,6 +20,7 @@ const BUILTIN_SKILLS: Record<string, string> = {
   qa: qaMd,
   reviewer: reviewerMd,
   synthesis: synthesisMd,
+  "tool-output-analyzer": toolOutputAnalyzerMd,
   "ux-reviewer": uxReviewerMd,
 };
 
