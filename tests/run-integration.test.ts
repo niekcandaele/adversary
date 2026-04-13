@@ -125,7 +125,7 @@ exit 0
  */
 function makeFakeBin(tmpDir: string, opts: {
   implementExitCode?: number;
-  verifyStatus?: "ok" | "error";
+  verifyStatus?: string;
   prCreateExitCode?: number;
   prCreateOutput?: string;
 }): { binDir: string; verifyHarnessPath: string; prCreateArgsLog: string; summarizerScriptPath: string } {

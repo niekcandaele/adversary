@@ -191,6 +191,7 @@ describe("runDiscovery", () => {
       summarizerCommandTemplate: "true",
       implementTimeoutMs: 10000,
       verifyTimeoutMs: 10000,
+      testTimeoutMs: 30000,
       prTimeoutMs: 10000,
       summarizerTimeoutMs: 10000,
       browserAutomation: "warn",
