@@ -1,8 +1,28 @@
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
 import type { SkillOverride } from "../../types/index.js";
 
-const SKILLS_DIR = join(dirname(fileURLToPath(import.meta.url)));
+// Embed skill templates at compile time so they're available in compiled binaries.
+// Bun's `with { type: "text" }` inlines these as string constants in the bundle.
+import discoveryMd from "./discovery.md" with { type: "text" };
+import exerciserMd from "./exerciser.md" with { type: "text" };
+import planCompletenessMd from "./plan-completeness.md" with { type: "text" };
+import qaMd from "./qa.md" with { type: "text" };
+import reviewerMd from "./reviewer.md" with { type: "text" };
+import staticAnalysisMd from "./static-analysis.md" with { type: "text" };
+import synthesisMd from "./synthesis.md" with { type: "text" };
+import testerMd from "./tester.md" with { type: "text" };
+import uxReviewerMd from "./ux-reviewer.md" with { type: "text" };
+
+const BUILTIN_SKILLS: Record<string, string> = {
+  discovery: discoveryMd,
+  exerciser: exerciserMd,
+  "plan-completeness": planCompletenessMd,
+  qa: qaMd,
+  reviewer: reviewerMd,
+  "static-analysis": staticAnalysisMd,
+  synthesis: synthesisMd,
+  tester: testerMd,
+  "ux-reviewer": uxReviewerMd,
+};
 
 /**
  * Load a skill prompt template, applying any overrides.
@@ -27,8 +47,11 @@ export async function loadSkillTemplate(
   if (overrides?.promptFile) {
     content = await Bun.file(overrides.promptFile).text();
   } else {
-    const skillPath = join(SKILLS_DIR, `${skillName}.md`);
-    content = await Bun.file(skillPath).text();
+    const builtin = BUILTIN_SKILLS[skillName];
+    if (!builtin) {
+      throw new Error(`Unknown built-in skill: ${skillName}`);
+    }
+    content = builtin;
   }
 
   if (overrides?.extraContext) {
