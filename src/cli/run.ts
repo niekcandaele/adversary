@@ -121,7 +121,6 @@ export async function runCommand(options: RunOptions): Promise<void> {
     state.outcome === "implement-failure" ||
     state.outcome === "summarizer-failure" ||
     state.outcome === "verify-failure" ||
-    state.outcome === "verify-blocked" ||
     state.outcome === "verify-error";
 
   if (isFailureOutcome) {

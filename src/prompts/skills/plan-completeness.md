@@ -31,10 +31,10 @@ You are checking whether the implementation is complete relative to the plan.
 ## Output Format
 
 Return ONLY a JSON object with this schema:
-{"status": "ok"|"blocked"|"error", "findings": [{"title": "...", "severity": N, "description": "...", "sources": ["plan-completeness"]}]}
+{"status": "ok"|"error", "findings": [{"title": "...", "severity": N, "description": "...", "sources": ["plan-completeness"]}]}
 
 Where:
-- status: "ok" if plan appears complete, "blocked" if no plan was provided, "error" if failed
+- status: "ok" if plan appears complete (or no plan was provided), "error" if failed
 - findings: array with at most one plan-completeness finding (empty if plan is fully implemented)
 - severity: always 8 for plan incompleteness findings
 - location: omit entirely from findings (not applicable)

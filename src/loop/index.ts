@@ -234,7 +234,7 @@ export async function runLoop(options: {
     }
 
     // 5. Scope detection (deterministic)
-    const verifyCommand = "multi-skill: 6 parallel + exerciser + synthesis";
+    const verifyCommand = "multi-skill: 4 parallel + deterministic commands + exerciser + synthesis";
     await writeText(join(turnDir, "verify-command.txt"), verifyCommand);
 
     process.stdout.write("\n");
@@ -298,30 +298,7 @@ export async function runLoop(options: {
 
     const verifyDurationMs = Date.now() - verifyStart;
 
-    // 6. Handle blocked
-    if (report.status === "blocked") {
-      process.stderr.write(`\n[Turn ${turn}] Verify returned status=blocked. Stopping.\n`);
-      const { thresholdFindings, belowThresholdFindings } = filterFindings(report.findings, threshold);
-      const turnResult: TurnResult = {
-        turn,
-        implementCommand,
-        verifyCommand,
-        implementDurationMs: implResult.durationMs,
-        verifyDurationMs,
-        repoChanged,
-        commitSha,
-        verifyStatus: "blocked",
-        thresholdFindings,
-        belowThresholdFindings,
-        outcome: "verify-blocked",
-      };
-      state.turns.push(turnResult);
-      await writeTurnSummary(turnDir, turnResult);
-      state.outcome = "verify-blocked";
-      return state;
-    }
-
-    // 7. Handle error status
+    // 6. Handle error status
     if (report.status === "error") {
       process.stderr.write(`\n[Turn ${turn}] Verify returned status=error. Stopping.\n`);
       const { thresholdFindings, belowThresholdFindings } = filterFindings(report.findings, threshold);

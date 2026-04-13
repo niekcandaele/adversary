@@ -390,7 +390,10 @@ describe("runLoop integration", () => {
     expect(state.turns[0]?.outcome).toBe("summarizer-failure");
   }, 30000);
 
-  test("sets verify-blocked outcome when verify reports status=blocked", async () => {
+  test("synthesis returning blocked status is treated as fallback (blocked no longer stops the loop)", async () => {
+    // "blocked" is no longer a valid synthesis status. When the harness returns blocked,
+    // the orchestrator uses deterministic synthesis fallback which returns "ok" (no skill errors).
+    // The loop proceeds normally based on threshold findings.
     const cwd = await makeGitRepo();
     const runDir = join(cwd, ".test-runs", "test-run-blocked");
     await initRunDir(runDir);
@@ -412,15 +415,10 @@ describe("runLoop integration", () => {
       summarizerName: "fake-summarizer-blocked.sh",
     });
 
-    await runLoop({ cwd, state, planContent: "# Test Plan Blocked\nDo a thing.", maxTurns: 3, threshold: 7, config });
+    await runLoop({ cwd, state, planContent: "# Test Plan Blocked\nDo a thing.", maxTurns: 1, threshold: 7, config });
 
-    expect(state.outcome).toBe("verify-blocked");
-    expect(state.turns).toHaveLength(1);
-    expect(state.turns[0]?.outcome).toBe("verify-blocked");
-    expect(state.turns[0]?.verifyStatus).toBe("blocked");
-    // findings from blocked verify should still be recorded
-    expect(state.turns[0]?.thresholdFindings).toHaveLength(1);
-    expect(state.turns[0]?.thresholdFindings[0]?.title).toBe("Blocking Issue");
+    // No longer stops with verify-blocked — loop handles findings via threshold
+    expect(state.outcome).not.toBe("verify-blocked");
   }, 60000);
 
   test("recovers from commit failure caused by pre-commit hook", async () => {

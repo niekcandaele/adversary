@@ -22,31 +22,13 @@ describe("synthesizeFallback", () => {
     expect(report.status).toBe("ok");
   });
 
-  test("returns blocked status when any skill is blocked", () => {
+  test("returns error status when any skill has error", () => {
     const results: SkillResult[] = [
       { skill: "reviewer", exitCode: 0, durationMs: 100, findings: [], status: "completed" },
-      { skill: "tester", exitCode: 1, durationMs: 0, findings: [], status: "blocked" },
-    ];
-    const report = synthesizeFallback(results);
-    expect(report.status).toBe("blocked");
-  });
-
-  test("returns error status when any skill has error (no blocked)", () => {
-    const results: SkillResult[] = [
-      { skill: "reviewer", exitCode: 0, durationMs: 100, findings: [], status: "completed" },
-      { skill: "tester", exitCode: 1, durationMs: 0, findings: [], status: "error" },
+      { skill: "qa", exitCode: 1, durationMs: 0, findings: [], status: "error" },
     ];
     const report = synthesizeFallback(results);
     expect(report.status).toBe("error");
-  });
-
-  test("blocked takes precedence over error", () => {
-    const results: SkillResult[] = [
-      { skill: "reviewer", exitCode: 1, durationMs: 0, findings: [], status: "error" },
-      { skill: "tester", exitCode: 1, durationMs: 0, findings: [], status: "blocked" },
-    ];
-    const report = synthesizeFallback(results);
-    expect(report.status).toBe("blocked");
   });
 
   test("concatenates all findings from all skills", () => {

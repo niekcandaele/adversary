@@ -121,10 +121,10 @@ State & Lifecycle:
 ## Output Format
 
 Return ONLY a JSON object with this schema:
-{"status": "ok"|"blocked"|"error", "findings": [{"title": "...", "severity": N, "description": "...", "sources": ["reviewer"], "location": {"path": "...", "line": N}}]}
+{"status": "ok"|"error", "findings": [{"title": "...", "severity": N, "description": "...", "sources": ["reviewer"], "location": {"path": "...", "line": N}}]}
 
 Where:
-- status: "ok" if review completed, "blocked" if cannot proceed, "error" if failed
+- status: "ok" if review completed, "error" if failed
 - findings: array of issues found (empty array if none)
 - severity: 1-10 scale
 - location.line: optional, omit if not applicable

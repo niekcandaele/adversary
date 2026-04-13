@@ -56,6 +56,7 @@ Config file fields:
     "summarizerCommandTemplate": "pi -p @{promptFile}",
     "implementTimeoutMs": 2700000,
     "verifyTimeoutMs": 900000,
+    "testTimeoutMs": 1800000,
     "prTimeoutMs": 300000,
     "summarizerTimeoutMs": 300000,
     "browserAutomation": "warn",
@@ -97,6 +98,7 @@ Template variables:
 Timeouts (set via config file — defaults):
   implementTimeoutMs:  2700000 (45 minutes)
   verifyTimeoutMs:     900000  (15 minutes, per-skill)
+  testTimeoutMs:       1800000 (30 minutes, for deterministic test command)
   prTimeoutMs:         300000  (5 minutes)
   summarizerTimeoutMs: 300000  (5 minutes)
 

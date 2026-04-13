@@ -19,6 +19,7 @@ function parseConfigLayer(raw: Record<string, unknown>): Partial<AdversaryConfig
   if (typeof raw.implementTimeoutMs === "number")
     layer.implementTimeoutMs = raw.implementTimeoutMs;
   if (typeof raw.verifyTimeoutMs === "number") layer.verifyTimeoutMs = raw.verifyTimeoutMs;
+  if (typeof raw.testTimeoutMs === "number") layer.testTimeoutMs = raw.testTimeoutMs;
   if (typeof raw.prTimeoutMs === "number") layer.prTimeoutMs = raw.prTimeoutMs;
   if (typeof raw.summarizerTimeoutMs === "number")
     layer.summarizerTimeoutMs = raw.summarizerTimeoutMs;

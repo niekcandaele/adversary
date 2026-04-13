@@ -45,6 +45,7 @@ describe("loadConfig", () => {
     expect(config.summarizerCommandTemplate).toBe(DEFAULT_CONFIG.summarizerCommandTemplate);
     expect(config.implementTimeoutMs).toBe(DEFAULT_CONFIG.implementTimeoutMs);
     expect(config.verifyTimeoutMs).toBe(DEFAULT_CONFIG.verifyTimeoutMs);
+    expect(config.testTimeoutMs).toBe(DEFAULT_CONFIG.testTimeoutMs);
     expect(config.prTimeoutMs).toBe(DEFAULT_CONFIG.prTimeoutMs);
     expect(config.summarizerTimeoutMs).toBe(DEFAULT_CONFIG.summarizerTimeoutMs);
   });
@@ -91,6 +92,21 @@ describe("loadConfig", () => {
     await writeFile(badConfigPath, "{ not valid json }");
 
     expect(loadConfig(tmpDir, badConfigPath)).rejects.toThrow();
+  });
+
+  test("loads testTimeoutMs from file", async () => {
+    const configPath = join(tmpDir, "adversary-test-timeout.json");
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        testTimeoutMs: 7200000,
+      })
+    );
+
+    const config = await loadConfig(tmpDir, configPath);
+    expect(config.testTimeoutMs).toBe(7200000);
+    // Other fields stay at default
+    expect(config.verifyTimeoutMs).toBe(DEFAULT_CONFIG.verifyTimeoutMs);
   });
 
   test("loads summarizerCommandTemplate from file", async () => {

@@ -6,15 +6,13 @@ import type { SkillResult, VerifyReport, VerifyFinding } from "../types/index.js
  */
 export function synthesizeFallback(results: SkillResult[]): VerifyReport {
   // Determine overall status
-  let hasBlocked = false;
   let hasError = false;
 
   for (const r of results) {
-    if (r.status === "blocked") hasBlocked = true;
     if (r.status === "error" || r.status === "timeout") hasError = true;
   }
 
-  const status = hasBlocked ? "blocked" : hasError ? "error" : "ok";
+  const status = hasError ? "error" : "ok";
 
   // Collect all findings
   const allFindings = results.flatMap((r) => r.findings);

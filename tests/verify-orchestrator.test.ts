@@ -186,10 +186,10 @@ describe("runVerification orchestrator", () => {
     expect(existsSync(verifyDir)).toBe(true);
     expect(existsSync(join(verifyDir, "skills"))).toBe(true);
 
-    // Each skill should have a prompt file
+    // Each LLM skill should have a prompt file
     expect(existsSync(join(verifyDir, "skills", "reviewer.prompt.md"))).toBe(true);
     expect(existsSync(join(verifyDir, "skills", "qa.prompt.md"))).toBe(true);
-    expect(existsSync(join(verifyDir, "skills", "tester.prompt.md"))).toBe(true);
+    // tester and static-analysis are no longer LLM skills — no prompt files for them
 
     // Synthesis prompt should exist
     expect(existsSync(join(verifyDir, "synthesis.prompt.md"))).toBe(true);
@@ -198,7 +198,9 @@ describe("runVerification orchestrator", () => {
     expect(existsSync(join(turnDir, "verify.json"))).toBe(true);
   }, 120000);
 
-  test("handles blocked synthesis status", async () => {
+  test("synthesis returning blocked status falls back to deterministic synthesis (blocked no longer valid)", async () => {
+    // "blocked" is no longer a valid synthesis status — the orchestrator should fall back to
+    // deterministic synthesis when the LLM returns it.
     const turnDir = join(tmpDir, "turn-blocked");
     const harness = writeFakeHarness(tmpDir, "fake-harness-blocked.sh", {
       findings: [{ title: "Blocked Issue", severity: 9, description: "Cannot proceed", sources: ["qa"] }],
@@ -221,7 +223,9 @@ describe("runVerification orchestrator", () => {
       projectSkills: "",
     });
 
-    expect(report.status).toBe("blocked");
+    // blocked is no longer valid — falls back to deterministic synthesis → "ok"
+    expect(["ok", "error"]).toContain(report.status);
+    expect(report.status).not.toBe("blocked");
   }, 120000);
 
   test("uses fallback synthesis when harness outputs invalid JSON", async () => {
@@ -251,7 +255,7 @@ describe("runVerification orchestrator", () => {
     });
 
     expect(report.schemaVersion).toBe(1);
-    expect(["ok", "blocked", "error"]).toContain(report.status);
+    expect(["ok", "error"]).toContain(report.status);
     expect(Array.isArray(report.findings)).toBe(true);
   }, 120000);
 
@@ -376,7 +380,7 @@ describe("runVerification orchestrator", () => {
 
     // Should still complete; reviewer's error SkillResult contributes 0 findings via synthesis
     expect(report.schemaVersion).toBe(1);
-    expect(["ok", "blocked", "error"]).toContain(report.status);
+    expect(["ok", "error"]).toContain(report.status);
     expect(Array.isArray(report.findings)).toBe(true);
   }, 120000);
 
@@ -413,7 +417,7 @@ describe("runVerification orchestrator", () => {
 
     // Fallback should produce a valid report
     expect(report.schemaVersion).toBe(1);
-    expect(["ok", "blocked", "error"]).toContain(report.status);
+    expect(["ok", "error"]).toContain(report.status);
     expect(Array.isArray(report.findings)).toBe(true);
   }, 120000);
 
@@ -501,7 +505,7 @@ exit 0
 
     // Fallback produces a valid report
     expect(report.schemaVersion).toBe(1);
-    expect(["ok", "blocked", "error"]).toContain(report.status);
+    expect(["ok", "error"]).toContain(report.status);
     expect(Array.isArray(report.findings)).toBe(true);
   }, 120000);
 
@@ -561,7 +565,7 @@ exit 0
 
     // Fallback produces a valid report with schemaVersion 1
     expect(report.schemaVersion).toBe(1);
-    expect(["ok", "blocked", "error"]).toContain(report.status);
+    expect(["ok", "error"]).toContain(report.status);
   }, 120000);
 
   test("custom parallel steps are run alongside builtin skills", async () => {
@@ -602,5 +606,92 @@ exit 0
 
     // Custom step prompt file should be created in skills dir
     expect(existsSync(join(turnDir, "verify", "skills", "my-custom-check.stdout.log"))).toBe(true);
+  }, 120000);
+
+  // VI-7: non-null discovery commands produce deterministic findings that flow through synthesis
+  test("deterministic findings from non-null discovery commands flow into synthesis output", async () => {
+    const turnDir = join(tmpDir, "turn-deterministic-discovery");
+
+    // Create a failing test command that will produce a deterministic finding
+    const failingTestScript = join(tmpDir, "failing-test-for-det.sh");
+    writeFileSync(failingTestScript, `#!/bin/sh\necho "TEST FAILED: assertion error"\nexit 1\n`, { mode: 0o755 });
+
+    // Harness that:
+    // - For LLM skills (non-synthesis): returns ok with no findings
+    // - For command-analyzer: returns a finding
+    // - For synthesis prompt: returns ok with all the findings it receives
+    const detHarness = join(tmpDir, "det-discovery-harness.sh");
+    writeFileSync(
+      detHarness,
+      `#!/bin/sh
+PROMPT_FILE=""
+for arg in "$@"; do
+  case "$arg" in
+    @*) PROMPT_FILE="\${arg#@}" ;;
+  esac
+done
+
+if [ -z "$PROMPT_FILE" ]; then
+  echo '{"status":"ok","findings":[]}'
+  exit 0
+fi
+
+CONTENT=$(cat "$PROMPT_FILE" 2>/dev/null || echo "")
+
+if echo "$CONTENT" | grep -q "schemaVersion"; then
+  echo '{"schemaVersion":1,"status":"ok","findings":[]}'
+  exit 0
+fi
+
+if echo "$CONTENT" | grep -q 'testCommand\\|toolchain discovery'; then
+  echo '{"testCommand":null,"buildCommand":null,"lintCommands":[],"typeCheckCommands":[],"startCommand":null,"browserDeps":[]}'
+  exit 0
+fi
+
+if echo "$CONTENT" | grep -q "commandType\\|output"; then
+  echo '{"findings":[{"title":"Test Failure","severity":8,"description":"A test assertion failed","sources":["det-test"]}]}'
+  exit 0
+fi
+
+echo '{"status":"ok","findings":[]}'
+exit 0
+`,
+      { mode: 0o755 }
+    );
+
+    const discovery: ToolchainDiscovery = {
+      testCommand: failingTestScript,
+      buildCommand: null,
+      lintCommands: [],
+      typeCheckCommands: [],
+      startCommand: null,
+      browserDeps: [],
+    };
+
+    const config: AdversaryConfig = {
+      ...DEFAULT_CONFIG,
+      verifyCommandTemplate: `${detHarness} @{promptFile}`,
+      verifyTimeoutMs: 30000,
+      testTimeoutMs: 30000,
+    };
+
+    const report = await runVerification({
+      cwd,
+      turnDir,
+      scope: EMPTY_SCOPE,
+      discovery,
+      planContent: "# Test Plan",
+      config,
+      projectSkills: "",
+    });
+
+    // The deterministic test command failed — its output file should exist
+    const detTestOutputPath = join(turnDir, "verify", "skills", "det-test.output.json");
+    expect(existsSync(detTestOutputPath)).toBe(true);
+
+    // The report should be valid
+    expect(report.schemaVersion).toBe(1);
+    expect(["ok", "error"]).toContain(report.status);
+    expect(Array.isArray(report.findings)).toBe(true);
   }, 120000);
 });

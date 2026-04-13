@@ -90,7 +90,7 @@ describe("parseSkillOutput behavior (via runVerification)", () => {
 
     // Should produce a valid report even when all skills time out
     expect(report.schemaVersion).toBe(1);
-    expect(["ok", "blocked", "error"]).toContain(report.status);
+    expect(["ok", "error"]).toContain(report.status);
     expect(Array.isArray(report.findings)).toBe(true);
   }, 60000);
 

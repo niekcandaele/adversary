@@ -90,10 +90,10 @@ Look for: time dependency, order dependency, network calls in tests, shared muta
 ## Output Format
 
 Return ONLY a JSON object with this schema:
-{"status": "ok"|"blocked"|"error", "findings": [{"title": "...", "severity": N, "description": "...", "sources": ["qa"], "location": {"path": "...", "line": N}}]}
+{"status": "ok"|"error", "findings": [{"title": "...", "severity": N, "description": "...", "sources": ["qa"], "location": {"path": "...", "line": N}}]}
 
 Where:
-- status: "ok" if review completed, "blocked" if cannot proceed, "error" if failed
+- status: "ok" if review completed, "error" if failed
 - findings: array of issues found (empty array if none)
 - severity: 1-10 (9-10: critical untested paths; 7-8: new endpoint with no tests, missing regression; 5-6: missing edge cases; 3-4: suboptimal test type; 1-2: style)
 - location.line: optional, omit if not applicable

@@ -68,12 +68,12 @@ Stop any services you started.
 ## Output Format
 
 Return ONLY a JSON object with this schema:
-{"status": "ok"|"blocked"|"error", "findings": [{"title": "...", "severity": N, "description": "...", "sources": ["exerciser"], "location": {"path": "...", "line": N}}]}
+{"status": "ok"|"error", "findings": [{"title": "...", "severity": N, "description": "...", "sources": ["exerciser"], "location": {"path": "...", "line": N}}]}
 
 Where:
-- status: "ok" if exercise completed and feature works, "blocked" if cannot start/reach feature, "error" if feature does not work
+- status: "ok" if exercise completed and feature works (or could not be started/reached — report as finding), "error" if feature does not work
 - findings: array of issues found (empty if feature works correctly)
 - severity: 1-10 (9-10: cannot function/data loss; 7-8: major broken; 5-6: clear issues; 3-4: minor; 1-2: cosmetic)
 - location.line: optional, omit if not applicable
 
-**Blocked status reasons:** STARTUP_FAILED, NO_APP_FOUND, LOGIN_REQUIRED, UNCLEAR_FEATURE, NO_EXERCISE_STRATEGY, SERVICE_UNAVAILABLE, NO_ENGINEER_SKILL
+**If app cannot be started or feature cannot be reached**, return status "ok" with a severity-7 finding describing the reason (e.g., STARTUP_FAILED, NO_APP_FOUND, LOGIN_REQUIRED, UNCLEAR_FEATURE, NO_EXERCISE_STRATEGY, SERVICE_UNAVAILABLE, NO_ENGINEER_SKILL).

@@ -21,12 +21,12 @@ import {
 } from "./prompt-builder.js";
 import { synthesizeFallback } from "./synthesis-fallback.js";
 import { extractJson } from "../utils/json.js";
+import { runDeterministicCommands } from "./deterministic.js";
+import { validateRawFindings } from "./findings.js";
 
 const BUILTIN_PARALLEL_SKILLS: BuiltinSkillName[] = [
   "reviewer",
   "qa",
-  "tester",
-  "static-analysis",
   "ux-reviewer",
   "plan-completeness",
 ];
@@ -75,7 +75,7 @@ export async function runVerification(options: {
     projectSkills,
   };
 
-  // ── Phase 1: Parallel skills ─────────────────────────────────────────────
+  // ── Phase 1: Parallel skills + deterministic commands ───────────────────
 
   const phase1Skills = [...BUILTIN_PARALLEL_SKILLS];
   const customParallel = config.customVerificationSteps.filter((s) => s.phase === "parallel");
@@ -84,8 +84,12 @@ export async function runVerification(options: {
     ...phase1Skills.map((s) => s as string),
     ...customParallel.map((s) => s.name),
   ];
+
+  // Build scoped files string for command-analyzer
+  const scopedFiles = scope.files.map((f) => `${f.status}: ${f.path}`).join("\n");
+
   process.stdout.write(
-    `\n  [verify] Running ${allParallelNames.length} skills in parallel: ${allParallelNames.join(", ")}\n`
+    `\n  [verify] Running ${allParallelNames.length} LLM skills in parallel: ${allParallelNames.join(", ")} (+ deterministic commands)\n`
   );
 
   const phase1Promises = [
@@ -115,7 +119,20 @@ export async function runVerification(options: {
     ),
   ];
 
-  const phase1Settled = await Promise.allSettled(phase1Promises);
+  const deterministicPromise = runDeterministicCommands({
+    discovery,
+    cwd,
+    skillsDir,
+    config,
+    scopedFiles,
+    env,
+  });
+
+  const [phase1Settled, deterministicResults] = await Promise.all([
+    Promise.allSettled(phase1Promises),
+    deterministicPromise,
+  ]);
+
   const phase1Results: SkillResult[] = phase1Settled.map((r, i) => {
     const skillName =
       i < phase1Skills.length
@@ -135,6 +152,9 @@ export async function runVerification(options: {
       };
     }
   });
+
+  // Merge deterministic results into phase1Results
+  phase1Results.push(...deterministicResults);
 
   // ── Phase 2: Exerciser (sequential) ─────────────────────────────────────
 
@@ -371,61 +391,13 @@ function parseSkillOutput(
 
   try {
     const parsed = extractJson(stdout) as Record<string, unknown>;
-    const VALID_STATUSES: ReadonlySet<string> = new Set(["completed", "blocked", "error", "timeout"]);
+    const VALID_STATUSES: ReadonlySet<string> = new Set(["completed", "error", "timeout"]);
     const rawStatus = typeof parsed.status === "string" && VALID_STATUSES.has(parsed.status)
       ? (parsed.status as SkillResult["status"])
       : "completed";
     const status = rawStatus;
     const rawFindings = Array.isArray(parsed.findings) ? parsed.findings : [];
-    const findings: VerifyFinding[] = [];
-
-    for (let i = 0; i < rawFindings.length; i++) {
-      const f = rawFindings[i] as Record<string, unknown>;
-      if (typeof f !== "object" || f === null) {
-        process.stderr.write(
-          `  Warning: skill "${skillName}" findings[${i}] is not an object — skipping\n`
-        );
-        continue;
-      }
-      if (typeof f.title !== "string") {
-        process.stderr.write(
-          `  Warning: skill "${skillName}" findings[${i}].title must be a string — skipping\n`
-        );
-        continue;
-      }
-      if (typeof f.severity !== "number") {
-        process.stderr.write(
-          `  Warning: skill "${skillName}" findings[${i}].severity must be a number — skipping\n`
-        );
-        continue;
-      }
-      if (typeof f.description !== "string") {
-        process.stderr.write(
-          `  Warning: skill "${skillName}" findings[${i}].description must be a string — skipping\n`
-        );
-        continue;
-      }
-      // Construct from explicit validated fields only — do not spread arbitrary LLM keys
-      const rawLocation = f.location as Record<string, unknown> | undefined;
-      const location: VerifyFinding["location"] =
-        rawLocation &&
-        typeof rawLocation === "object" &&
-        typeof rawLocation.path === "string"
-          ? {
-              path: rawLocation.path,
-              ...(typeof rawLocation.line === "number" ? { line: rawLocation.line } : {}),
-            }
-          : undefined;
-      findings.push({
-        title: f.title as string,
-        severity: f.severity as number,
-        description: f.description as string,
-        sources: Array.isArray(f.sources)
-          ? (f.sources as unknown[]).filter((s): s is string => typeof s === "string")
-          : [skillName],
-        ...(location ? { location } : {}),
-      });
-    }
+    const findings = validateRawFindings(rawFindings, skillName);
 
     return { findings, status };
   } catch {
@@ -492,48 +464,12 @@ async function runSynthesis(options: {
     // Validate it looks like a VerifyReport
     if (
       parsed.schemaVersion === 1 &&
-      ["ok", "blocked", "error"].includes(parsed.status as string) &&
+      ["ok", "error"].includes(parsed.status as string) &&
       Array.isArray(parsed.findings)
     ) {
-      // Validate individual findings (skip malformed ones with a warning)
-      const validFindings: VerifyFinding[] = [];
+      // Validate individual findings using shared validateRawFindings (skips malformed with warning)
       const rawFindings = parsed.findings as unknown[];
-      for (let i = 0; i < rawFindings.length; i++) {
-        const f = rawFindings[i] as Record<string, unknown>;
-        if (
-          typeof f === "object" &&
-          f !== null &&
-          typeof f.title === "string" &&
-          typeof f.severity === "number" &&
-          typeof f.description === "string"
-        ) {
-          // Construct from explicit validated fields only — do not spread arbitrary LLM keys
-          const sources = Array.isArray(f.sources)
-            ? (f.sources as unknown[]).filter((s): s is string => typeof s === "string")
-            : ["synthesis"];
-          const rawLoc = f.location as Record<string, unknown> | undefined;
-          const loc: VerifyFinding["location"] =
-            rawLoc &&
-            typeof rawLoc === "object" &&
-            typeof rawLoc.path === "string"
-              ? {
-                  path: rawLoc.path,
-                  ...(typeof rawLoc.line === "number" ? { line: rawLoc.line } : {}),
-                }
-              : undefined;
-          validFindings.push({
-            title: f.title as string,
-            severity: f.severity as number,
-            description: f.description as string,
-            sources,
-            ...(loc ? { location: loc } : {}),
-          });
-        } else {
-          process.stderr.write(
-            `  Warning: synthesis findings[${i}] is malformed — skipping\n`
-          );
-        }
-      }
+      const validFindings = validateRawFindings(rawFindings, "synthesis");
 
       const report: VerifyReport = {
         schemaVersion: 1,

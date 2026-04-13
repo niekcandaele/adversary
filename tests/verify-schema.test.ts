@@ -35,12 +35,6 @@ describe("parseVerifyOutput — valid input", () => {
     expect(report.findings[0]?.severity).toBe(7);
   });
 
-  test("blocked status", async () => {
-    const path = writeTempJson({ schemaVersion: 1, status: "blocked", findings: [] });
-    const report = await parseVerifyOutput(path);
-    expect(report.status).toBe("blocked");
-  });
-
   test("error status", async () => {
     const path = writeTempJson({ schemaVersion: 1, status: "error", findings: [] });
     const report = await parseVerifyOutput(path);
@@ -67,6 +61,11 @@ describe("parseVerifyOutput — error cases", () => {
 
   test("invalid status throws VerifyParseError", async () => {
     const path = writeTempJson({ schemaVersion: 1, status: "unknown", findings: [] });
+    await expect(parseVerifyOutput(path)).rejects.toBeInstanceOf(VerifyParseError);
+  });
+
+  test("blocked status is no longer valid — throws VerifyParseError", async () => {
+    const path = writeTempJson({ schemaVersion: 1, status: "blocked", findings: [] });
     await expect(parseVerifyOutput(path)).rejects.toBeInstanceOf(VerifyParseError);
   });
 
