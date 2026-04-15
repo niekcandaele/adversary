@@ -99,7 +99,7 @@ Controls behavior when no browser automation dependencies (Playwright/Puppeteer/
 
 | Value | Behavior |
 |-------|----------|
-| `"warn"` (default) | Print warning, prompt to continue (auto-continues in non-TTY) |
+| `"warn"` (default) | Print warning and continue without browser automation |
 | `"require"` | Fail preflight if browser automation is not available |
 | `"skip"` | Silently skip browser automation checks |
 

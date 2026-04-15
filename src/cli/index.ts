@@ -66,7 +66,7 @@ Config file fields:
 
   browserAutomation: "warn" | "require" | "skip"
     Controls behavior when no browser automation deps (Playwright/Puppeteer/Cypress) are found.
-    "warn" (default): print warning, prompt to continue
+    "warn" (default): print warning and continue without browser automation
     "require": fail preflight if browser automation not available
     "skip": silently skip browser automation checks
 
