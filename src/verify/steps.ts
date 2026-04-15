@@ -16,12 +16,22 @@ export async function writeBranchContextFile(options: {
   planFile: string;
   scope: VerifyScope;
   discovery: ToolchainDiscovery;
+  repoGuidance?: string;
 }): Promise<string> {
-  const { verifyDir, planFile, scope, discovery } = options;
+  const { verifyDir, planFile, scope, discovery, repoGuidance = "" } = options;
   const contextPath = join(verifyDir, "branch-context.txt");
   const changedFiles = scope.files.length > 0
     ? scope.files.map((file) => `- ${file.status}: ${file.path}`).join("\n")
     : "- No changed files detected";
+
+  const repoGuidanceSection = repoGuidance.trim().length > 0
+    ? [
+        "",
+        "## Repo guidance",
+        "",
+        repoGuidance,
+      ]
+    : [];
 
   const content = [
     "# Branch Verification Context",
@@ -44,6 +54,7 @@ export async function writeBranchContextFile(options: {
     "## Discovery metadata",
     "",
     JSON.stringify(discovery, null, 2),
+    ...repoGuidanceSection,
   ].join("\n");
 
   await writeText(contextPath, content);

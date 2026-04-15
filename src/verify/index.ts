@@ -45,10 +45,10 @@ export async function runVerification(options: {
   planContent: string;
   planFile?: string;
   config: AdversaryConfig;
-  projectSkills: string;
+  repoGuidance: string;
   env?: NodeJS.ProcessEnv;
 }): Promise<VerifyReport> {
-  const { cwd, turnDir, scope, discovery, planContent, config, projectSkills, env } = options;
+  const { cwd, turnDir, scope, discovery, planContent, config, repoGuidance, env } = options;
 
   const verifyDir = join(turnDir, "verify");
   await ensureDir(join(verifyDir, "steps"));
@@ -67,6 +67,7 @@ export async function runVerification(options: {
     planFile,
     scope,
     discovery,
+    repoGuidance,
   });
 
   const commonVars = {
@@ -75,7 +76,7 @@ export async function runVerification(options: {
     diffStat: scope.diffStat,
     discoveryJson: buildDiscoveryContext(discovery),
     planContent,
-    projectSkills,
+    projectSkills: repoGuidance,
     planFile,
     branchContextFile,
   };
@@ -513,7 +514,16 @@ async function runSynthesis(options: {
       const report: VerifyReport = {
         schemaVersion: 1,
         status: parsed.status as VerifyReport["status"],
-        findings: validateRawFindings(parsed.findings as unknown[], "synthesis"),
+        findings: synthesizeFallback([
+          {
+            skill: "synthesis",
+            exitCode: stepResult.exitCode,
+            durationMs: stepResult.durationMs,
+            findings: validateRawFindings(parsed.findings as unknown[], "synthesis"),
+            status: "completed",
+            artifactDir: synthesisDir,
+          },
+        ]).findings,
       };
       await writeJsonFile(join(synthesisDir, "output.json"), report);
       return report;

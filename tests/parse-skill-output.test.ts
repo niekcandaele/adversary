@@ -85,7 +85,7 @@ describe("parseSkillOutput behavior (via runVerification)", () => {
       discovery: EMPTY_DISCOVERY,
       planContent: "# Test Plan",
       config,
-      projectSkills: "",
+      repoGuidance: "",
     });
 
     // Should produce a valid report even when all skills time out
@@ -135,7 +135,7 @@ exit 0
       discovery: EMPTY_DISCOVERY,
       planContent: "# Test Plan",
       config,
-      projectSkills: "",
+      repoGuidance: "",
     });
 
     expect(report.schemaVersion).toBe(1);
@@ -164,7 +164,7 @@ exit 0
       discovery: EMPTY_DISCOVERY,
       planContent: "# Test Plan",
       config,
-      projectSkills: "",
+      repoGuidance: "",
     });
 
     expect(report.schemaVersion).toBe(1);
@@ -209,7 +209,7 @@ exit 0
       discovery: EMPTY_DISCOVERY,
       planContent: "# Test Plan",
       config,
-      projectSkills: "",
+      repoGuidance: "",
     });
 
     // Only the valid finding should be in the report

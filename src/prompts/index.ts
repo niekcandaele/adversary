@@ -102,9 +102,14 @@ export async function generateFirstTurnPrompt(options: {
   turn: number;
   maxTurns: number;
   branch: string;
+  repoGuidance?: string;
   outputPath: string;
 }): Promise<string> {
-  const { planContent, threshold, turn, maxTurns, branch, outputPath } = options;
+  const { planContent, threshold, turn, maxTurns, branch, repoGuidance = "", outputPath } = options;
+
+  const repoGuidanceMd = repoGuidance.trim().length > 0
+    ? `\n---\n\n## Repo Guidance\n\n${repoGuidance}\n`
+    : "";
 
   const content = `# Adversarial Implementation Loop — Turn ${turn} of ${maxTurns}
 
@@ -125,6 +130,7 @@ You are on branch: \`${branch}\`
 ## Severity Threshold
 Threshold: **${threshold}** (findings with severity >= ${threshold} will block the loop)
 
+${repoGuidanceMd}
 ---
 
 ## Plan
@@ -144,10 +150,10 @@ export async function generateLaterTurnPrompt(options: {
   branch: string;
   thresholdFindings: VerifyFinding[];
   commitError?: string;
-  historyContent: string;
+  repoGuidance?: string;
   outputPath: string;
 }): Promise<string> {
-  const { planContent, threshold, turn, maxTurns, branch, thresholdFindings, commitError, historyContent, outputPath } = options;
+  const { planContent, threshold, turn, maxTurns, branch, thresholdFindings, commitError, repoGuidance = "", outputPath } = options;
 
   const commitErrorMd = commitError
     ? `### Commit Failure (severity 10)\n\nYour previous changes failed to commit due to a pre-commit hook error:\n\n\`\`\`\n${commitError}\n\`\`\`\n\nFix the issues listed above. The uncommitted changes from last turn are still in the working tree.\n\n---\n\n`
@@ -164,6 +170,10 @@ export async function generateLaterTurnPrompt(options: {
         })
         .join("\n\n---\n\n")
     : (commitError ? "" : "_No threshold findings._");
+
+  const repoGuidanceMd = repoGuidance.trim().length > 0
+    ? `\n---\n\n## Repo Guidance\n\n${repoGuidance}\n`
+    : "";
 
   const content = `# Adversarial Implementation Loop — Turn ${turn} of ${maxTurns}
 
@@ -184,17 +194,12 @@ You are on branch: \`${branch}\`
 ## Severity Threshold
 Threshold: **${threshold}** (you must fix findings with severity >= ${threshold})
 
+${repoGuidanceMd}
 ---
 
 ## Current Findings to Fix (severity >= ${threshold})
 
 ${commitErrorMd}${findingsMd}
-
----
-
-## Run History
-
-${historyContent}
 
 ---
 

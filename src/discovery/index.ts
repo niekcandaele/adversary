@@ -12,6 +12,7 @@ export { extractJson } from "../utils/json.js";
 
 const DISCOVERY_CACHE_FILE = "discovery.json";
 const PROJECT_SKILLS_CACHE_FILE = "projectSkills.txt";
+const REPO_GUIDANCE_CACHE_FILE = "repoGuidance.txt";
 
 /**
  * Run toolchain discovery. Cached after turn 1 using {runDir}/discovery.json.
@@ -28,6 +29,8 @@ export async function runDiscovery(options: {
 }): Promise<ToolchainDiscovery> {
   const { cwd, scope, config, runDir, turnDir, env } = options;
 
+  await cacheRepoGuidance(cwd, runDir);
+
   // Check cache — both discovery and projectSkills are written together.
   // Known limitation: there is no cache invalidation mechanism. If the project's
   // toolchain changes mid-run (e.g. new dependencies installed, package.json updated),
@@ -41,11 +44,8 @@ export async function runDiscovery(options: {
   // Generate project structure snapshot
   const projectStructure = await gatherProjectStructure(cwd);
 
-  // Discover project skills (cache alongside discovery)
-  const projectSkillsCachePath = join(runDir, PROJECT_SKILLS_CACHE_FILE);
-  const projectSkills = await discoverProjectSkills(cwd);
-  // Write project skills cache so the loop doesn't re-run find commands each turn
-  await writeText(projectSkillsCachePath, projectSkills);
+  // Read cached project skills for discovery prompt context.
+  const projectSkills = await getCachedProjectSkills(runDir);
 
   // Load and interpolate discovery template
   const template = await loadSkillTemplate("discovery");
@@ -196,6 +196,43 @@ export async function getCachedProjectSkills(runDir: string): Promise<string> {
 }
 
 /**
+ * Read cached combined repo guidance (project skills + repo docs).
+ * Returns empty string if no cache exists.
+ */
+export async function getCachedRepoGuidance(runDir: string): Promise<string> {
+  const cachePath = join(runDir, REPO_GUIDANCE_CACHE_FILE);
+  if (!fileExists(cachePath)) return "";
+  return await Bun.file(cachePath).text();
+}
+
+/**
+ * Discover and cache repo guidance so it is available to both implement and verify prompts.
+ */
+export async function cacheRepoGuidance(
+  cwd: string,
+  runDir: string
+): Promise<{ projectSkills: string; repoGuidance: string }> {
+  const projectSkillsPath = join(runDir, PROJECT_SKILLS_CACHE_FILE);
+  const repoGuidancePath = join(runDir, REPO_GUIDANCE_CACHE_FILE);
+
+  if (fileExists(projectSkillsPath) && fileExists(repoGuidancePath)) {
+    return {
+      projectSkills: await Bun.file(projectSkillsPath).text(),
+      repoGuidance: await Bun.file(repoGuidancePath).text(),
+    };
+  }
+
+  const projectSkills = await discoverProjectSkills(cwd);
+  const repoDocs = await discoverRepoDocs(cwd);
+  const repoGuidance = combineRepoGuidance(projectSkills, repoDocs);
+
+  await writeText(projectSkillsPath, projectSkills);
+  await writeText(repoGuidancePath, repoGuidance);
+
+  return { projectSkills, repoGuidance };
+}
+
+/**
  * Discover project skills from .claude/skills/ and .pi/skills/ directories.
  * Returns concatenated skill content.
  */
@@ -237,4 +274,37 @@ export async function discoverProjectSkills(cwd: string): Promise<string> {
   if (skillContents.length === 0) return "";
 
   return "## Project Skills\n\n" + skillContents.join("\n\n---\n\n");
+}
+
+/**
+ * Discover repo instruction docs from common locations.
+ */
+export async function discoverRepoDocs(cwd: string): Promise<string> {
+  const candidatePaths = [
+    "AGENTS.md",
+    "CLAUDE.md",
+    join(".claude", "CLAUDE.md"),
+  ];
+
+  const docContents: string[] = [];
+
+  for (const relativePath of candidatePaths) {
+    const fullPath = join(cwd, relativePath);
+    if (!fileExists(fullPath)) continue;
+
+    try {
+      const content = await Bun.file(fullPath).text();
+      docContents.push(`### ${relativePath}\n\n${content}`);
+    } catch {
+      // skip unreadable files
+    }
+  }
+
+  if (docContents.length === 0) return "";
+  return "## Repo Docs\n\n" + docContents.join("\n\n---\n\n");
+}
+
+function combineRepoGuidance(projectSkills: string, repoDocs: string): string {
+  const parts = [projectSkills, repoDocs].filter((part) => part.trim().length > 0);
+  return parts.join("\n\n---\n\n");
 }

@@ -106,7 +106,7 @@ describe("runVerification orchestrator", () => {
       discovery: EMPTY_DISCOVERY,
       planContent: "# Test Plan",
       config: { ...DEFAULT_CONFIG, verifyCommandTemplate: `${harness} @{promptFile}` },
-      projectSkills: "",
+      repoGuidance: "",
     });
 
     expect(report.status).toBe("ok");
@@ -129,12 +129,14 @@ describe("runVerification orchestrator", () => {
       discovery: EMPTY_DISCOVERY,
       planContent: "# My Special Plan",
       config: { ...DEFAULT_CONFIG, verifyCommandTemplate: `${harness} @{promptFile}` },
-      projectSkills: "## Project Skills\n\nSome skill info",
+      repoGuidance: "## Project Skills\n\nSome skill info\n\n---\n\n## Repo Docs\n\nUse the repo guide.",
     });
 
     const reviewerPrompt = await Bun.file(join(turnDir, "verify", "steps", "reviewer", "prompt.md")).text();
     expect(reviewerPrompt).toContain("src/test.ts");
     expect(reviewerPrompt).toContain("Some skill info");
+    const branchContext = await Bun.file(join(turnDir, "verify", "branch-context.txt")).text();
+    expect(branchContext).toContain("Use the repo guide.");
 
     const planPrompt = await Bun.file(join(turnDir, "verify", "steps", "plan-completeness", "prompt.md")).text();
     expect(planPrompt).toContain("My Special Plan");
@@ -159,7 +161,7 @@ describe("runVerification orchestrator", () => {
           { name: "codex-review", commandTemplate: customStep, phase: "parallel-review" },
         ],
       },
-      projectSkills: "",
+      repoGuidance: "",
     });
 
     expect(existsSync(join(turnDir, "verify", "steps", "codex-review", "stdout.log"))).toBe(true);
@@ -189,7 +191,7 @@ describe("runVerification orchestrator", () => {
           { name: "custom-test", phase: "deterministic", kind: "test", commandTemplate: deterministicStep },
         ],
       },
-      projectSkills: "",
+      repoGuidance: "",
     });
 
     expect(existsSync(join(turnDir, "verify", "steps", "custom-test", "output.json"))).toBe(true);
@@ -211,7 +213,7 @@ describe("runVerification orchestrator", () => {
       discovery: EMPTY_DISCOVERY,
       planContent: "# Test Plan",
       config: { ...DEFAULT_CONFIG, verifyCommandTemplate: `${badHarness} @{promptFile}` },
-      projectSkills: "",
+      repoGuidance: "",
     });
 
     expect(report.status).toBe("ok");

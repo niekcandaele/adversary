@@ -14,7 +14,7 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { runLoop } from "../src/loop/index.js";
 import type { RunState, AdversaryConfig } from "../src/types/index.js";
@@ -204,6 +204,37 @@ describe("runLoop integration", () => {
     const summary = JSON.parse(readFileSync(summaryPath, "utf8"));
     expect(summary.outcome).toBe("clean");
     expect(summary.turn).toBe(1);
+  }, 60000);
+
+  test("turn 1 implement prompt includes cached repo guidance", async () => {
+    const cwd = await makeGitRepo();
+    writeFileSync(join(cwd, "AGENTS.md"), "# Repo Rules\nKeep changes aligned with the repo.");
+    const skillDir = join(cwd, ".claude", "skills", "repo-style");
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(join(skillDir, "SKILL.md"), "# Repo Skill\nAlways follow the house style.");
+
+    const runDir = join(cwd, ".test-runs", "test-run-guidance");
+    await initRunDir(runDir);
+    await snapshotPlan(runDir, "# Guided Plan\nDo a thing.");
+
+    const state: RunState = {
+      runDir,
+      planFile: join(runDir, "plan.txt"),
+      planTitle: "Guided Plan",
+      branch: "adversary/test-branch",
+      baseBranch: "main",
+      startedAt: new Date().toISOString(),
+      turns: [],
+    };
+
+    const config = makeConfig(cwd, { findings: [], verifyStatus: "ok", summarizerName: "fake-summarizer-guidance.sh" });
+
+    await runLoop({ cwd, state, planContent: "# Guided Plan\nDo a thing.", maxTurns: 1, threshold: 7, config });
+
+    const prompt = readFileSync(join(runDir, "turn-1", "implement-input.md"), "utf8");
+    expect(prompt).toContain("Repo Guidance");
+    expect(prompt).toContain("Repo Skill");
+    expect(prompt).toContain("Keep changes aligned with the repo.");
   }, 60000);
 
   test("terminates capped when max turns reached with findings remaining", async () => {
