@@ -124,7 +124,10 @@ Return ONLY a JSON object with this schema:
 {"status": "ok"|"error", "findings": [{"title": "...", "severity": N, "description": "...", "sources": ["reviewer"], "location": {"path": "...", "line": N}}]}
 
 Where:
-- status: "ok" if review completed, "error" if failed
+- status: "ok" if review completed and all discovered issues are reported as findings
+- status: "error" only if the reviewer itself failed to complete the review
 - findings: array of issues found (empty array if none)
 - severity: 1-10 scale
 - location.line: optional, omit if not applicable
+
+Serious product bugs still belong in `findings` with `status: "ok"`.

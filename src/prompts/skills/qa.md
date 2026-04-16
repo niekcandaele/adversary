@@ -93,9 +93,12 @@ Return ONLY a JSON object with this schema:
 {"status": "ok"|"error", "findings": [{"title": "...", "severity": N, "description": "...", "sources": ["qa"], "location": {"path": "...", "line": N}}]}
 
 Where:
-- status: "ok" if review completed, "error" if failed
+- status: "ok" if review completed and quality risks are reported as findings
+- status: "error" only if the QA pass itself failed
 - findings: array of issues found (empty array if none)
 - severity: 1-10 (9-10: critical untested paths; 7-8: new endpoint with no tests, missing regression; 5-6: missing edge cases; 3-4: suboptimal test type; 1-2: style)
 - location.line: optional, omit if not applicable
+
+Do not use top-level `error` for normal coverage or quality findings.
 
 **Maturity adjustment:** In GREENFIELD projects, shift severities down 1-2 points for coverage gaps.

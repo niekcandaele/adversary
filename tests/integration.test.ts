@@ -294,7 +294,7 @@ describe("runLoop integration", () => {
     expect(state.turns[0]?.outcome).toBe("implement-failure");
   }, 30000);
 
-  test("sets verify-error outcome when verify reports status=error", async () => {
+  test("treats synthesized status=error with valid findings as a normal threshold-driven verify result", async () => {
     const cwd = await makeGitRepo();
     const runDir = join(cwd, ".test-runs", "test-run-error");
     await initRunDir(runDir);
@@ -318,11 +318,14 @@ describe("runLoop integration", () => {
 
     await runLoop({ cwd, state, planContent: "# Test Plan Error\nDo a thing.", maxTurns: 3, threshold: 7, config });
 
-    expect(state.outcome).toBe("verify-error");
-    expect(state.turns).toHaveLength(1);
-    expect(state.turns[0]?.outcome).toBe("verify-error");
-    expect(state.turns[0]?.verifyStatus).toBe("error");
-    // findings from error verify should still be recorded
+    expect(state.outcome).toBe("capped");
+    expect(state.turns).toHaveLength(3);
+    expect(state.turns[0]?.outcome).toBe("continue");
+    expect(state.turns[0]?.verifyStatus).toBe("ok");
+    expect(state.turns[1]?.outcome).toBe("continue");
+    expect(state.turns[1]?.verifyStatus).toBe("ok");
+    expect(state.turns[2]?.outcome).toBe("capped");
+    expect(state.turns[2]?.verifyStatus).toBe("ok");
     expect(state.turns[0]?.thresholdFindings).toHaveLength(1);
     expect(state.turns[0]?.thresholdFindings[0]?.title).toBe("Error Issue");
   }, 60000);

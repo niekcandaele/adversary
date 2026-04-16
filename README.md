@@ -267,11 +267,13 @@ The built-in verification pipeline produces this JSON internally. For custom or 
 
 | Status | Meaning |
 |--------|---------|
-| `ok` | Verify completed, findings (if any) are normal |
-| `blocked` | Verify could not complete (e.g. build broken, can't run tests) |
-| `error` | Verify step itself errored |
+| `ok` | Verify completed and produced a usable findings report; findings may still be severe |
+| `blocked` | External/custom verify could not complete (e.g. build broken, can't run tests) |
+| `error` | The verify framework itself errored and could not produce a reliable report |
 
 `blocked` and `error` stop the loop.
+
+For the built-in multi-skill verifier, ordinary product defects, coverage gaps, regressions, tool timeouts, and other branch issues are represented as findings under `status: "ok"`. The loop then uses the severity threshold to decide whether to continue.
 
 ## Artifacts
 

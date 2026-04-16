@@ -59,8 +59,8 @@ export interface ToolchainDiscovery {
 
 /**
  * Status of a verify run.
- * - "ok": verification ran and found no blocking issues
- * - "error": verification ran but encountered errors
+ * - "ok": verification completed and produced a usable findings report
+ * - "error": the verification framework itself failed to produce a reliable report
  * - "skipped": verification did not run (implement/summarizer/commit failure before verify step)
  */
 export type VerifyStatus = "ok" | "error" | "skipped";

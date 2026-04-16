@@ -25,9 +25,9 @@ async function makeGitRepo(): Promise<string> {
 function writeFakeHarness(
   dir: string,
   name: string,
-  opts: { synthesisFindings?: unknown[]; skillFindings?: unknown[] } = {}
+  opts: { synthesisFindings?: unknown[]; skillFindings?: unknown[]; synthesisStatus?: "ok" | "error" } = {}
 ): string {
-  const { synthesisFindings = [], skillFindings = [] } = opts;
+  const { synthesisFindings = [], skillFindings = [], synthesisStatus = "ok" } = opts;
   const path = join(dir, name);
   writeFileSync(
     path,
@@ -42,7 +42,7 @@ done
 CONTENT=$(cat "$PROMPT_FILE" 2>/dev/null || echo "")
 
 if echo "$CONTENT" | grep -q 'schemaVersion'; then
-  echo '{"schemaVersion":1,"status":"ok","findings":${JSON.stringify(synthesisFindings)}}'
+  echo '{"schemaVersion":1,"status":"${synthesisStatus}","findings":${JSON.stringify(synthesisFindings)}}'
   exit 0
 fi
 
@@ -218,5 +218,35 @@ describe("runVerification orchestrator", () => {
 
     expect(report.status).toBe("ok");
     expect(report.findings.some((finding) => finding.severity === 8)).toBe(true);
+  }, 120000);
+
+  test("synthesis status error is normalized to ok when findings are valid", async () => {
+    const turnDir = join(tmpDir, "turn-synthesis-status-error");
+    const harness = writeFakeHarness(tmpDir, "fake-harness-synthesis-error.sh", {
+      synthesisStatus: "error",
+      synthesisFindings: [
+        {
+          title: "Real product issue",
+          severity: 8,
+          description: "The branch still has a defect that should feed the next turn.",
+          sources: ["reviewer"],
+          location: { path: "src/test.ts", line: 1 },
+        },
+      ],
+    });
+
+    const report = await runVerification({
+      cwd,
+      turnDir,
+      scope: EMPTY_SCOPE,
+      discovery: EMPTY_DISCOVERY,
+      planContent: "# Test Plan",
+      config: { ...DEFAULT_CONFIG, verifyCommandTemplate: `${harness} @{promptFile}` },
+      repoGuidance: "",
+    });
+
+    expect(report.status).toBe("ok");
+    expect(report.findings).toHaveLength(1);
+    expect(report.findings[0]?.title).toBe("Real product issue");
   }, 120000);
 });

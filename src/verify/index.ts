@@ -513,7 +513,11 @@ async function runSynthesis(options: {
     if (parsed.schemaVersion === 1 && ["ok", "error"].includes(String(parsed.status)) && Array.isArray(parsed.findings)) {
       const report: VerifyReport = {
         schemaVersion: 1,
-        status: parsed.status as VerifyReport["status"],
+        // A synthesized findings report should not be able to terminate the loop
+        // just because the LLM labeled ordinary defects as top-level "error".
+        // If synthesis produced structured findings, treat that as a usable
+        // verify result and let threshold handling decide whether to continue.
+        status: "ok",
         findings: synthesizeFallback([
           {
             skill: "synthesis",

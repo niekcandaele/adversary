@@ -34,7 +34,10 @@ Return ONLY a JSON object with this schema:
 {"status": "ok"|"error", "findings": [{"title": "...", "severity": N, "description": "...", "sources": ["plan-completeness"]}]}
 
 Where:
-- status: "ok" if plan appears complete (or no plan was provided), "error" if failed
+- status: "ok" if the completeness review completed and any gaps are reported as findings
+- status: "error" only if the completeness review itself failed
 - findings: array with at most one plan-completeness finding (empty if plan is fully implemented)
 - severity: always 8 for plan incompleteness findings
 - location: omit entirely from findings (not applicable)
+
+An incomplete implementation is a finding, not a top-level verifier error.

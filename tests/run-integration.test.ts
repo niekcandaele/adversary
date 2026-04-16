@@ -327,7 +327,7 @@ describe("runCommand integration", () => {
     expect(await argsFile.exists()).toBe(true);
   }, 120000);
 
-  test("(a) verify-error outcome skips push and PR creation", async () => {
+  test("(a) synthesized status=error with valid findings follows normal capped flow and still creates a PR", async () => {
     const repoDir = await makeGitRepo();
     const tmpBinDir = mkdtempSync(join(tmpdir(), "adversary-run-fakebin-verifyerror-"));
     const { binDir, verifyHarnessPath, prCreateArgsLog, summarizerScriptPath } = makeFakeBin(tmpBinDir, {
@@ -347,7 +347,7 @@ describe("runCommand integration", () => {
     await runWithFakePath(repoDir, binDir, planPath, configPath);
 
     const argsFile = Bun.file(prCreateArgsLog);
-    expect(await argsFile.exists()).toBe(false);
+    expect(await argsFile.exists()).toBe(true);
   }, 120000);
 
   test("(b) PrError from createPr propagates out of runCommand", async () => {
