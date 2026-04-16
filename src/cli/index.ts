@@ -54,7 +54,7 @@ Config file fields:
     "implementCommandTemplate": "pi -p @{promptFile}",
     "verifyCommandTemplate": "pi -p @{promptFile}",
     "summarizerCommandTemplate": "pi -p @{promptFile}",
-    "implementTimeoutMs": 2700000,
+    "implementTimeoutMs": 10800000,
     "verifyTimeoutMs": 900000,
     "testTimeoutMs": 1800000,
     "prTimeoutMs": 300000,
@@ -100,7 +100,7 @@ Template variables:
   {baseBranch}       Base branch name
 
 Timeouts (set via config file — defaults):
-  implementTimeoutMs:  2700000 (45 minutes)
+  implementTimeoutMs:  10800000 (3 hours)
   verifyTimeoutMs:     900000  (15 minutes, per-skill)
   testTimeoutMs:       1800000 (30 minutes, for deterministic test command)
   prTimeoutMs:         300000  (5 minutes)

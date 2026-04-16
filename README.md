@@ -79,7 +79,7 @@ Create `.adversary.json` in the repo root (or a global config for shared setting
   "implementCommandTemplate": "pi -p @{promptFile}",
   "verifyCommandTemplate": "pi -p @{promptFile}",
   "summarizerCommandTemplate": "pi -p @{promptFile}",
-  "implementTimeoutMs": 2700000,
+  "implementTimeoutMs": 10800000,
   "verifyTimeoutMs": 900000,
   "prTimeoutMs": 300000,
   "summarizerTimeoutMs": 300000,
@@ -344,7 +344,7 @@ Structure:
 
 | Timeout | Default | Config key |
 |---------|---------|-----------|
-| Implement step | 45 minutes | `implementTimeoutMs` |
+| Implement step | 3 hours | `implementTimeoutMs` |
 | Verify step (per skill) | 15 minutes | `verifyTimeoutMs` |
 | PR creation | 5 minutes | `prTimeoutMs` |
 | Summarizer step | 5 minutes | `summarizerTimeoutMs` |

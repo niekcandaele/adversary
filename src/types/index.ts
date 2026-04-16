@@ -106,7 +106,7 @@ export const DEFAULT_CONFIG: AdversaryConfig = {
   implementCommandTemplate: "pi -p @{promptFile}",
   verifyCommandTemplate: "pi -p @{promptFile}",
   summarizerCommandTemplate: "pi -p @{promptFile}",
-  implementTimeoutMs: 2700000,
+  implementTimeoutMs: 10800000,
   verifyTimeoutMs: 900000,
   testTimeoutMs: 1800000,
   prTimeoutMs: 300000,

@@ -214,7 +214,7 @@ Suggested fields:
   "baseBranch": "main",
   "implementCommandTemplate": "pi -p @{promptFile}",
   "verifyCommandTemplate": "pi -p \"/skill:verify --mode=report-only --format=json --output={verifyOutputFile}\"",
-  "implementTimeoutMs": 2700000,
+  "implementTimeoutMs": 10800000,
   "verifyTimeoutMs": 5400000,
   "prTimeoutMs": 300000
 }
