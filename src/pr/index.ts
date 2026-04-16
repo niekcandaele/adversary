@@ -102,3 +102,77 @@ export function extractUrl(text: string): string | null {
   const match = text.match(/https?:\/\/\S+/);
   return match ? match[0] : null;
 }
+
+/**
+ * Find an existing open PR/MR for the given branch.
+ * Returns the PR URL if found, or null if none exists.
+ */
+export async function findExistingPr(
+  platform: Platform,
+  prCli: "gh" | "glab" | (string & {}),
+  branch: string,
+  cwd: string,
+  env?: NodeJS.ProcessEnv,
+  timeoutMs?: number
+): Promise<string | null> {
+  let argv: string[];
+  if (platform === "gitlab") {
+    argv = [prCli, "mr", "list", "--source-branch", branch, "--state", "opened", "--output", "json"];
+  } else {
+    if (platform === "unknown") {
+      process.stderr.write(`  [PR] Platform unknown — falling back to gh for PR lookup\n`);
+    }
+    argv = [prCli, "pr", "list", "--head", branch, "--state", "open", "--json", "url"];
+  }
+
+  const proc = Bun.spawn(argv, {
+    cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...(env ?? process.env) },
+  });
+
+  let stdout = "";
+  let timedOut = false;
+
+  const effectiveTimeout = timeoutMs ?? 30000;
+  const timeoutHandle = setTimeout(() => {
+    timedOut = true;
+    proc.kill("SIGTERM");
+    // Schedule a hard-kill after 2s grace period in case SIGTERM is ignored.
+    setTimeout(() => {
+      try {
+        proc.kill("SIGKILL");
+      } catch {
+        // Process may have already exited — ignore.
+      }
+    }, 2000);
+  }, effectiveTimeout);
+
+  try {
+    [stdout] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    await proc.exited;
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
+
+  if (timedOut || proc.exitCode !== 0) return null;
+
+  try {
+    const parsed = JSON.parse(stdout.trim());
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      // gh returns array of {url: "..."}; glab returns array of {web_url: "..."}
+      const first = parsed[0] as Record<string, unknown>;
+      const url = (first.url ?? first.web_url ?? null) as string | null;
+      return url;
+    }
+  } catch {
+    // If not JSON, try extracting URL from text
+    return extractUrl(stdout.trim());
+  }
+
+  return null;
+}

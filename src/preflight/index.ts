@@ -121,17 +121,20 @@ export async function runPreflight(
   cwd: string,
   planFile: string,
   config: import("../types/index.js").AdversaryConfig,
-  env?: NodeJS.ProcessEnv
+  env?: NodeJS.ProcessEnv,
+  options?: { resumeMode?: boolean }
 ): Promise<PreflightResult> {
   // 1. Must be inside a git repo
   if (!(await isGitRepo(cwd))) {
     throw new PreflightError(`Not inside a git repository: ${cwd}`);
   }
 
-  // 2. Clean working tree
-  const cleanResult = await isCleanWorkingTree(cwd);
-  if (!cleanResult.clean) {
-    throw new PreflightError(cleanResult.reason!);
+  // 2. Clean working tree (skipped in resume mode — resume handles dirty trees explicitly)
+  if (!options?.resumeMode) {
+    const cleanResult = await isCleanWorkingTree(cwd);
+    if (!cleanResult.clean) {
+      throw new PreflightError(cleanResult.reason!);
+    }
   }
 
   // 3. Plan file readable and non-empty

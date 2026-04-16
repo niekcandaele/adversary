@@ -83,6 +83,12 @@ export interface VerifyReport {
   schemaVersion: 1;
   status: VerifyStatus;
   findings: VerifyFinding[];
+  /**
+   * The HEAD commit SHA at the time this verify report was produced.
+   * Used on resume to detect if the commit has been amended or replaced
+   * since verification ran, in which case we must re-verify.
+   */
+  commitSha?: string;
 }
 
 // ── Config ───────────────────────────────────────────────────────────────────
@@ -161,7 +167,25 @@ export type RunOutcome =
   | "summarizer-failure"
   | "verify-failure"
   | "verify-error"
-  | "preflight-failure";
+  | "push-failure";
+
+/**
+ * Returns human-readable labels for a RunOutcome.
+ * Single source of truth shared across CLI and summary modules.
+ */
+export function getOutcomeLabels(outcome: RunOutcome): { humanizedSentence: string; summaryLabel: string } {
+  const labels = {
+    "clean":               { humanizedSentence: "all findings resolved",                   summaryLabel: "✓ Clean — zero threshold findings" },
+    "capped":              { humanizedSentence: "maximum turns reached with findings remaining", summaryLabel: "⚠ Capped — max turns reached with findings remaining" },
+    "implement-failure":   { humanizedSentence: "the implementer subprocess failed",        summaryLabel: "✗ Stopped — implementer step failed" },
+    "summarizer-failure":  { humanizedSentence: "the commit-message summarizer failed",     summaryLabel: "✗ Stopped — summarizer step failed" },
+    "verify-failure":      { humanizedSentence: "the verification pipeline failed",         summaryLabel: "✗ Stopped — verifier step failed" },
+    "verify-error":        { humanizedSentence: "the verification pipeline returned an error status", summaryLabel: "✗ Stopped — verifier returned error status" },
+    "commit-failure":      { humanizedSentence: "a pre-commit hook or git commit operation failed", summaryLabel: "✗ Stopped — commit step failed" },
+    "push-failure":        { humanizedSentence: "push to remote failed",                    summaryLabel: "✗ Stopped — push to remote failed" },
+  } satisfies Record<RunOutcome, { humanizedSentence: string; summaryLabel: string }>;
+  return labels[outcome];
+}
 
 export interface TurnResult {
   turn: number;
@@ -199,6 +223,71 @@ export interface RunState {
   outcome?: RunOutcome;
   prUrl?: string;
   prError?: string;
+}
+
+// ── Resume types ─────────────────────────────────────────────────────────────
+
+export interface ResumePoint {
+  turn: number;
+  skipImplement: boolean;
+  skipVerify: boolean;
+  knownCommitSha?: string;
+  /** True when user chose "keep" dirty tree on resume — triggers resume note in prompt */
+  resumeNote?: boolean;
+  /** True when the highest turn already reached a terminal outcome (clean/capped) — skip the loop entirely */
+  skipLoop?: boolean;
+  /**
+   * True when resume needs to extend maxTurns by 1 to re-verify extra commits added
+   * after the last completed turn (VI-6). The loop will allow startTurn === maxTurns + 1.
+   */
+  extendForResume?: boolean;
+}
+
+export interface DoneFlag {
+  outcome: RunOutcome;
+  completedAt: string;
+  prUrl?: string;
+}
+
+export interface RunInfo {
+  runId: string;
+  runDir: string;
+  startedAt: string;
+  completed: boolean;
+  outcome?: RunOutcome;
+}
+
+export interface ResumeOptions {
+  runId?: string;
+  configFile?: string;
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+  /**
+   * When true, skip the terminal-failure confirmation prompt (like --yes / -y flag).
+   * Does NOT bypass the dirty-tree prompt (that requires user judgement).
+   */
+  yes?: boolean;
+  /**
+   * Injectable deps for promptConfirmSync — for testing.
+   * If provided, bypasses the real stdin reader.
+   */
+  confirmDeps?: { isTTY: boolean; readLine: () => string };
+  /**
+   * Injectable deps for dirty-tree prompts (promptDirtyTreeSync / promptDirtyTreeSyncSkipImplement).
+   * If provided, bypasses the real stdin reader in those prompts.
+   */
+  dirtyTreeDeps?: { readLine: () => string };
+}
+
+export interface SavedRunConfig {
+  planFile: string;
+  planTitle: string;
+  branch: string;
+  baseBranch: string;
+  startedAt: string;
+  turns: number;
+  threshold: number;
+  config: AdversaryConfig;
 }
 
 // ── Process runner ───────────────────────────────────────────────────────────

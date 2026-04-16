@@ -3,12 +3,20 @@ import {
   checkoutBranch,
   createAndCheckoutBranch,
   autoSuffixBranchName,
+  branchExists,
 } from "../git/index.js";
 import { slugify, timestampCompact } from "../utils/slugify.js";
 
 export interface BranchSetupResult {
   baseBranch: string;
   featureBranch: string;
+}
+
+export async function reattachBranch(cwd: string, branch: string): Promise<void> {
+  if (!(await branchExists(branch, cwd))) {
+    throw new Error(`Branch '${branch}' does not exist locally. Cannot resume — the feature branch is missing.`);
+  }
+  await checkoutBranch(branch, cwd);
 }
 
 export async function setupBranch(

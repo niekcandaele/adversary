@@ -1,16 +1,29 @@
 import { resolve, basename, join } from "node:path";
-import type { RunOptions, RunState } from "../types/index.js";
+import type { RunOptions, RunState, SavedRunConfig, AdversaryConfig } from "../types/index.js";
 import { runPreflight } from "../preflight/index.js";
+import type { Platform } from "../preflight/index.js";
 import { setupBranch } from "../branch/index.js";
 import { loadConfig } from "../config/index.js";
-import { buildRunDir, initRunDir, saveRunConfig, snapshotPlan } from "../artifacts/index.js";
+import { buildRunDir, initRunDir, saveRunConfig, snapshotPlan, writeDoneFlag, runIdFromRunDir } from "../artifacts/index.js";
 import { runLoop } from "../loop/index.js";
 import { generateFinalSummary, assemblePrBody } from "../summary/index.js";
 import { generatePrSummary } from "../summarizer/index.js";
-import { pushBranch } from "../git/index.js";
-import { createPr, PrError } from "../pr/index.js";
+import { pushBranch, getRemoteBranchSha, getHeadSha, isAncestor, GitError } from "../git/index.js";
+import { createPr, findExistingPr, PrError } from "../pr/index.js";
 import { extractPlanTitle, slugify } from "../utils/slugify.js";
-import { writeText } from "../utils/fs.js";
+import { writeText, fileExists } from "../utils/fs.js";
+
+/**
+ * Thrown when pushing the branch to remote fails.
+ * Caught at the top level in runCommand and resumeCommand to write done.flag
+ * and exit with code 1.
+ */
+export class PushFailureError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PushFailureError";
+  }
+}
 
 export function validateRunOptions(options: RunOptions): void {
   if (options.turns < 1) {
@@ -18,6 +31,185 @@ export function validateRunOptions(options: RunOptions): void {
   }
   if (options.severityThreshold < 1 || options.severityThreshold > 10) {
     throw new Error("--severity-threshold must be between 1 and 10");
+  }
+}
+
+export function isFailureOutcome(outcome: string | undefined): boolean {
+  return (
+    outcome === "commit-failure" ||
+    outcome === "implement-failure" ||
+    outcome === "summarizer-failure" ||
+    outcome === "verify-failure" ||
+    outcome === "verify-error" ||
+    outcome === "push-failure"
+  );
+}
+
+/**
+ * Run the post-loop phases: final summary, PR description, push, PR creation.
+ * Skip phases whose artifacts already exist (idempotent for resume).
+ */
+export async function runPostLoopPhases(
+  state: RunState,
+  options: {
+    severityThreshold: number;
+    config: AdversaryConfig;
+    platform: Platform;
+    prCli: "gh" | "glab";
+    cwd: string;
+    env: NodeJS.ProcessEnv;
+  }
+): Promise<void> {
+  const { severityThreshold, config, platform, prCli, cwd, env } = options;
+
+  // Final summary
+  process.stdout.write(`\n[Summary] Generating final summary...\n`);
+  await generateFinalSummary(state, severityThreshold);
+
+  process.stdout.write(`\n[Result] Outcome: ${state.outcome}\n`);
+  process.stdout.write(`  Turns completed: ${state.turns.length}\n`);
+
+  if (isFailureOutcome(state.outcome)) {
+    process.stdout.write(
+      `\n[Push] Skipping push/PR — run ended with failure outcome: ${state.outcome}\n`
+    );
+    return;
+  }
+
+  // Generate PR body (skip if already exists)
+  const prBodyPath = join(state.runDir, "pr-body.md");
+  let prTitle: string;
+  let prBody: string;
+
+  const prTitlePath = join(state.runDir, "pr-title.txt");
+  if (fileExists(prBodyPath)) {
+    process.stdout.write(`\n[PR] Reusing existing PR description from ${prBodyPath}\n`);
+    prBody = await Bun.file(prBodyPath).text();
+    // Prefer the persisted title (written alongside pr-body.md), fall back to first line extraction
+    if (fileExists(prTitlePath)) {
+      prTitle = (await Bun.file(prTitlePath).text()).trim();
+    } else {
+      process.stdout.write(`\n[PR] pr-title.txt not found — using plan title fallback\n`);
+      const firstLine = prBody.split("\n")[0] ?? "";
+      prTitle = firstLine.startsWith("# ") ? firstLine.slice(2).trim() : state.planTitle.slice(0, 72);
+    }
+  } else {
+    process.stdout.write(`\n[PR] Generating PR description...\n`);
+    try {
+      const prSummary = await generatePrSummary({
+        config,
+        runDir: state.runDir,
+        branch: state.branch,
+        baseBranch: state.baseBranch,
+        planTitle: state.planTitle,
+        planContent: await Bun.file(join(state.runDir, "plan.txt")).text(),
+        cwd,
+        env,
+      });
+
+      // Apply fallback if LLM title is empty or unreasonably long (>200 chars)
+      const rawTitle = prSummary.title;
+      if (!rawTitle || rawTitle.trim() === "" || rawTitle.length > 200) {
+        prTitle = state.planTitle.slice(0, 72);
+      } else {
+        prTitle = rawTitle;
+      }
+
+      prBody = assemblePrBody(state, severityThreshold, prSummary, cwd);
+      await writeText(prBodyPath, prBody);
+      // Persist the title alongside the body so resume can recover it (VI-6)
+      await writeText(prTitlePath, prTitle);
+    } catch (e) {
+      state.prError = `PR summary generation failed: ${e}`;
+      await generateFinalSummary(state, severityThreshold);
+      process.stderr.write(`\n[PR] PR description generation failed: ${e}\n`);
+      throw e;
+    }
+  }
+
+  // Push branch (skip only if remote is already up-to-date with local HEAD)
+  const remoteSha = await getRemoteBranchSha(state.branch, "origin", cwd);
+  if (remoteSha !== null) {
+    const localSha = await getHeadSha(cwd);
+    if (remoteSha === localSha) {
+      process.stdout.write(`\n[Push] Branch ${state.branch} already up-to-date on remote — skipping push\n`);
+    } else {
+      // Check for divergent remote: remote SHA must be an ancestor of local HEAD (VI-8)
+      const remoteIsAncestor = await isAncestor(remoteSha, localSha, cwd);
+      if (!remoteIsAncestor) {
+        const runId = runIdFromRunDir(state.runDir);
+        const msg = `Remote branch has diverged from local — push refused. Reconcile manually (e.g. git pull --rebase).`;
+        process.stderr.write(`\n[Push] Error: ${msg}\n`);
+        process.stderr.write(`After resolving, retry with: adversary resume ${runId}\n`);
+        state.outcome = "push-failure";
+        await generateFinalSummary(state, severityThreshold);
+        throw new PushFailureError(`${msg} After resolving, retry with: adversary resume ${runId}`);
+      }
+      // Local has new commits — push them
+      process.stdout.write(`\n[Push] Branch ${state.branch} remote SHA differs from local HEAD — pushing...\n`);
+      try {
+        await pushBranch(state.branch, "origin", cwd);
+        process.stdout.write(`  Pushed OK\n`);
+      } catch (e) {
+        if (e instanceof GitError) {
+          const runId = runIdFromRunDir(state.runDir);
+          process.stderr.write(`\n[Push] Error: push failed: ${e.message}\n`);
+          process.stderr.write(`After resolving, retry with: adversary resume ${runId}\n`);
+          state.outcome = "push-failure";
+          await generateFinalSummary(state, severityThreshold);
+          throw new PushFailureError(`push failed: ${e.message}. After resolving, retry with: adversary resume ${runId}`);
+        }
+        throw e;
+      }
+    }
+  } else {
+    process.stdout.write(`\n[Push] Pushing branch ${state.branch}...\n`);
+    try {
+      await pushBranch(state.branch, "origin", cwd);
+      process.stdout.write(`  Pushed OK\n`);
+    } catch (e) {
+      if (e instanceof GitError) {
+        const runId = runIdFromRunDir(state.runDir);
+        process.stderr.write(`\n[Push] Error: push failed: ${e.message}\n`);
+        process.stderr.write(`After resolving, retry with: adversary resume ${runId}\n`);
+        state.outcome = "push-failure";
+        await generateFinalSummary(state, severityThreshold);
+        throw new PushFailureError(`push failed: ${e.message}. After resolving, retry with: adversary resume ${runId}`);
+      }
+      throw e;
+    }
+  }
+
+  // Create PR/MR (skip if already exists)
+  const existingPrUrl = await findExistingPr(platform, prCli, state.branch, cwd, env, config.prTimeoutMs);
+  if (existingPrUrl) {
+    process.stdout.write(`\n[PR] Found existing PR/MR: ${existingPrUrl}\n`);
+    state.prUrl = existingPrUrl;
+    await generateFinalSummary(state, severityThreshold);
+  } else {
+    process.stdout.write(`\n[PR] Creating draft PR/MR...\n`);
+    try {
+      const prUrl = await createPr({
+        state,
+        platform,
+        prCli,
+        prBody,
+        prTitle,
+        cwd,
+        timeoutMs: config.prTimeoutMs,
+        env,
+      });
+      state.prUrl = prUrl;
+      await generateFinalSummary(state, severityThreshold);
+    } catch (e) {
+      if (e instanceof PrError) {
+        state.prError = e.message;
+        await generateFinalSummary(state, severityThreshold);
+        process.stderr.write(`\n[PR] PR/MR creation failed — exiting with error despite run outcome: ${state.outcome}\n`);
+        throw e;
+      }
+      throw e;
+    }
   }
 }
 
@@ -61,6 +253,13 @@ export async function runCommand(options: RunOptions): Promise<void> {
 
   process.stdout.write(`  Run dir: ${runDir}\n`);
 
+  // Install SIGINT handler now that we know runDir
+  const runId = runIdFromRunDir(runDir);
+  process.once("SIGINT", () => {
+    process.stderr.write(`\nRun interrupted. Resume with: adversary resume ${runId}\n`);
+    process.exit(130);
+  });
+
   // 5. Snapshot plan
   await snapshotPlan(runDir, planContent);
 
@@ -75,7 +274,7 @@ export async function runCommand(options: RunOptions): Promise<void> {
   process.stdout.write(`  Feature: ${featureBranch}\n`);
 
   // 7. Save run config
-  await saveRunConfig(runDir, {
+  const savedRunConfig: SavedRunConfig = {
     planFile,
     planTitle,
     branch: featureBranch,
@@ -84,7 +283,8 @@ export async function runCommand(options: RunOptions): Promise<void> {
     threshold: options.severityThreshold,
     config,
     startedAt: new Date().toISOString(),
-  });
+  };
+  await saveRunConfig(runDir, savedRunConfig);
 
   // 8. Build initial run state
   const state: RunState = {
@@ -108,93 +308,35 @@ export async function runCommand(options: RunOptions): Promise<void> {
     env: spawnEnv,
   });
 
-  // 10. Final summary
-  process.stdout.write(`\n[Summary] Generating final summary...\n`);
-  await generateFinalSummary(state, options.severityThreshold);
-
-  process.stdout.write(`\n[Result] Outcome: ${state.outcome}\n`);
-  process.stdout.write(`  Turns completed: ${state.turns.length}\n`);
-
-  // 11. Push branch and create PR only on successful or capped outcomes
-  const isFailureOutcome =
-    state.outcome === "commit-failure" ||
-    state.outcome === "implement-failure" ||
-    state.outcome === "summarizer-failure" ||
-    state.outcome === "verify-failure" ||
-    state.outcome === "verify-error";
-
-  if (isFailureOutcome) {
-    process.stdout.write(
-      `\n[Push] Skipping push/PR — run ended with failure outcome: ${state.outcome}\n`
-    );
-  } else {
-    // 12. Generate LLM PR summary BEFORE pushing — so we don't leave an orphaned
-    //     remote branch if the summarizer fails.
-    process.stdout.write(`\n[PR] Generating PR description...\n`);
-    let prTitle: string;
-    let prBody: string;
-    try {
-      const prSummary = await generatePrSummary({
-        config,
-        runDir,
-        branch: featureBranch,
-        baseBranch,
-        planTitle,
-        planContent,
-        cwd,
-        env: spawnEnv,
+  // 10. Post-loop phases
+  try {
+    await runPostLoopPhases(state, {
+      severityThreshold: options.severityThreshold,
+      config,
+      platform: preflight.platform,
+      prCli: preflight.prCli,
+      cwd,
+      env: spawnEnv,
+    });
+  } catch (e) {
+    if (e instanceof PushFailureError) {
+      // push-failure: done.flag already has outcome set; write it and exit non-zero
+      await writeDoneFlag(runDir, {
+        outcome: state.outcome!,
+        completedAt: new Date().toISOString(),
+        prUrl: state.prUrl,
       });
-
-      // Apply fallback if LLM title is empty or unreasonably long (>200 chars)
-      const rawTitle = prSummary.title;
-      if (!rawTitle || rawTitle.trim() === "" || rawTitle.length > 200) {
-        prTitle = planTitle.slice(0, 72);
-      } else {
-        prTitle = rawTitle;
-      }
-
-      prBody = assemblePrBody(state, options.severityThreshold, prSummary, cwd);
-      await writeText(join(state.runDir, "pr-body.md"), prBody);
-    } catch (e) {
-      state.prError = `PR summary generation failed: ${e}`;
-      await generateFinalSummary(state, options.severityThreshold);
-      process.stderr.write(`\n[PR] PR description generation failed: ${e}\n`);
-      throw e;
+      process.exit(1);
     }
-
-    // 13. Push branch (after summary is ready — avoids orphaned remote branch)
-    process.stdout.write(`\n[Push] Pushing branch ${featureBranch}...\n`);
-    await pushBranch(featureBranch, "origin", cwd);
-    process.stdout.write(`  Pushed OK\n`);
-
-    // 14. Create PR/MR
-    process.stdout.write(`\n[PR] Creating draft PR/MR...\n`);
-    try {
-      const prUrl = await createPr({
-        state,
-        platform: preflight.platform,
-        prCli: preflight.prCli,
-        prBody,
-        prTitle,
-        cwd,
-        timeoutMs: config.prTimeoutMs,
-        env: spawnEnv,
-      });
-      state.prUrl = prUrl;
-      // Regenerate summary with PR URL
-      await generateFinalSummary(state, options.severityThreshold);
-    } catch (e) {
-      if (e instanceof PrError) {
-        state.prError = e.message;
-        await generateFinalSummary(state, options.severityThreshold);
-        // Note: PR/MR creation failure always causes non-zero exit,
-        // even when the run outcome was 'clean' or 'capped'.
-        process.stderr.write(`\n[PR] PR/MR creation failed — exiting with error despite run outcome: ${state.outcome}\n`);
-        throw e; // PR failure = non-zero exit
-      }
-      throw e;
-    }
+    throw e;
   }
+
+  // 11. Write done flag
+  await writeDoneFlag(runDir, {
+    outcome: state.outcome!,
+    completedAt: new Date().toISOString(),
+    prUrl: state.prUrl,
+  });
 
   process.stdout.write(`\n[Done] Run complete.\n`);
   process.stdout.write(`  Outcome: ${state.outcome}\n`);

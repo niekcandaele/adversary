@@ -104,16 +104,21 @@ export async function generateFirstTurnPrompt(options: {
   branch: string;
   repoGuidance?: string;
   outputPath: string;
+  resumeNote?: boolean;
 }): Promise<string> {
-  const { planContent, threshold, turn, maxTurns, branch, repoGuidance = "", outputPath } = options;
+  const { planContent, threshold, turn, maxTurns, branch, repoGuidance = "", outputPath, resumeNote = false } = options;
 
   const repoGuidanceMd = repoGuidance.trim().length > 0
     ? `\n---\n\n## Repo Guidance\n\n${repoGuidance}\n`
     : "";
 
+  const resumeNoteMd = resumeNote
+    ? `> **Note:** This turn is being resumed after an interruption. Partial work may exist in the working tree. Review the current state before making changes.\n\n`
+    : "";
+
   const content = `# Adversarial Implementation Loop — Turn ${turn} of ${maxTurns}
 
-## Your Role
+${resumeNoteMd}## Your Role
 You are the **implementer** in an adversarial implement→verify loop.
 Your job is to implement the plan below so that a subsequent verification step finds **zero findings with severity >= ${threshold}**.
 
@@ -152,8 +157,13 @@ export async function generateLaterTurnPrompt(options: {
   commitError?: string;
   repoGuidance?: string;
   outputPath: string;
+  resumeNote?: boolean;
 }): Promise<string> {
-  const { planContent, threshold, turn, maxTurns, branch, thresholdFindings, commitError, repoGuidance = "", outputPath } = options;
+  const { planContent, threshold, turn, maxTurns, branch, thresholdFindings, commitError, repoGuidance = "", outputPath, resumeNote = false } = options;
+
+  const resumeNoteMd = resumeNote
+    ? `> **Note:** This turn is being resumed after an interruption. Partial work may exist in the working tree. Review the current state before making changes.\n\n`
+    : "";
 
   const commitErrorMd = commitError
     ? `### Commit Failure (severity 10)\n\nYour previous changes failed to commit due to a pre-commit hook error:\n\n\`\`\`\n${commitError}\n\`\`\`\n\nFix the issues listed above. The uncommitted changes from last turn are still in the working tree.\n\n---\n\n`
@@ -177,7 +187,7 @@ export async function generateLaterTurnPrompt(options: {
 
   const content = `# Adversarial Implementation Loop — Turn ${turn} of ${maxTurns}
 
-## Your Role
+${resumeNoteMd}## Your Role
 You are the **implementer** in an adversarial implement→verify loop.
 Your job is to address the verification findings below so that a subsequent verification step finds **zero findings with severity >= ${threshold}**.
 

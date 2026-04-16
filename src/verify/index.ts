@@ -12,6 +12,7 @@ import type {
 import { runStep } from "../runner/index.js";
 import { ensureDir, writeText, writeJsonFile } from "../utils/fs.js";
 import { interpolate } from "../utils/slugify.js";
+import { getHeadSha } from "../git/index.js";
 import { loadSkillTemplate } from "../prompts/skills/loader.js";
 import {
   buildScopeContext,
@@ -166,6 +167,13 @@ export async function runVerification(options: {
     env,
   });
 
+  // Stamp the verify report with the current HEAD SHA so resume can detect
+  // if the commit was amended or replaced between verification and resumption.
+  try {
+    report.commitSha = await getHeadSha(cwd);
+  } catch {
+    // Non-fatal: if we can't read HEAD, just omit the SHA.
+  }
   await writeJsonFile(join(turnDir, "verify.json"), report);
   return report;
 }

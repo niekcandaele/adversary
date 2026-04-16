@@ -17,7 +17,7 @@ import { join } from "node:path";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { runLoop } from "../src/loop/index.js";
-import type { RunState, AdversaryConfig } from "../src/types/index.js";
+import type { RunState, AdversaryConfig, TurnResult } from "../src/types/index.js";
 import { buildRunDir, initRunDir, snapshotPlan } from "../src/artifacts/index.js";
 import { DEFAULT_CONFIG } from "../src/types/index.js";
 
@@ -173,6 +173,39 @@ describe("runLoop integration", () => {
     }
     await rm(xdgStateDir, { recursive: true, force: true });
   });
+
+  // VI-8: startTurn > maxTurns (without extendForResume) should throw an error
+  test("resumePoint with turn > maxTurns (no extendForResume) throws overflow error", async () => {
+    const cwd = await makeGitRepo();
+    const runDir = join(mkdtempSync(join(tmpdir(), "adversary-rundir-vi8-")), "test-run-overflow");
+    await initRunDir(runDir);
+    await snapshotPlan(runDir, "# Test Plan VI-8\nOverflow.");
+
+    const state: RunState = {
+      runDir,
+      planFile: join(runDir, "plan.txt"),
+      planTitle: "Test Plan VI-8",
+      branch: "adversary/test-branch",
+      baseBranch: "main",
+      startedAt: new Date().toISOString(),
+      turns: [],
+    };
+
+    const config = makeConfig(cwd, { findings: [], verifyStatus: "ok" });
+
+    // turn=5, maxTurns=3, no extendForResume — should throw
+    await expect(
+      runLoop({
+        cwd,
+        state,
+        planContent: "# Test Plan VI-8\nOverflow.",
+        maxTurns: 3,
+        threshold: 7,
+        config,
+        resumePoint: { turn: 5, skipImplement: false, skipVerify: false },
+      })
+    ).rejects.toThrow(/startTurn.*exceeds maxTurns|Resume error.*startTurn/i);
+  }, 30000);
 
   test("terminates clean when verify reports zero findings", async () => {
     const cwd = await makeGitRepo();
@@ -517,6 +550,68 @@ describe("runLoop integration", () => {
     expect(state.outcome).toBe("clean");
   }, 120000);
 
+  // ─────────────────────────────────────────────────────────────────────────────
+  // VI-7: skipLoop branch — no implement spawned, state.turns unchanged, outcome set
+  // ─────────────────────────────────────────────────────────────────────────────
+  test("skipLoop=true skips loop, sets outcome from last turn, no implement subprocess", async () => {
+    const cwd = await makeGitRepo();
+    const runDir = join(cwd, ".test-runs", "test-run-skiploop");
+    await initRunDir(runDir);
+    await snapshotPlan(runDir, "# Skip Loop Plan\nDo a thing.");
+
+    // Pre-populate state with a completed turn (clean outcome)
+    const completedTurn: TurnResult = {
+      turn: 1,
+      implementCommand: "fake-impl",
+      verifyCommand: "multi-skill",
+      implementDurationMs: 1000,
+      verifyDurationMs: 500,
+      repoChanged: true,
+      commitSha: "deadbeef1234",
+      verifyStatus: "ok",
+      thresholdFindings: [],
+      belowThresholdFindings: [],
+      outcome: "clean",
+    };
+
+    const state: RunState = {
+      runDir,
+      planFile: join(runDir, "plan.txt"),
+      planTitle: "Skip Loop Plan",
+      branch: "adversary/test-branch",
+      baseBranch: "main",
+      startedAt: new Date().toISOString(),
+      turns: [completedTurn],
+    };
+
+    const initialTurnsLength = state.turns.length;
+
+    // Use an implement command that would fail if called (to detect if implement runs)
+    const config: AdversaryConfig = {
+      ...DEFAULT_CONFIG,
+      implementCommandTemplate: "false", // exits non-zero — should NOT be called
+      verifyCommandTemplate: "true",
+      summarizerCommandTemplate: "true",
+      implementTimeoutMs: 5000,
+      verifyTimeoutMs: 5000,
+    };
+
+    await runLoop({
+      cwd,
+      state,
+      planContent: "# Skip Loop Plan\nDo a thing.",
+      maxTurns: 5,
+      threshold: 7,
+      config,
+      resumePoint: { turn: 1, skipImplement: false, skipVerify: false, skipLoop: true },
+    });
+
+    // state.turns must be unchanged (no new turns added)
+    expect(state.turns).toHaveLength(initialTurnsLength);
+    // state.outcome must be set from the last turn's outcome
+    expect(state.outcome).toBe("clean");
+  }, 30000);
+
   test("sets commit-failure outcome when all turns exhausted on hook failure", async () => {
     const cwd = await makeGitRepo();
     const runDir = join(mkdtempSync(join(tmpdir(), "adversary-rundir-cfc-")), "test-run-commit-fail-capped");
@@ -569,5 +664,61 @@ describe("runLoop integration", () => {
     expect(state.turns[0]?.outcome).toBe("commit-failure");
     expect(state.turns[1]?.outcome).toBe("commit-failure");
     expect(state.outcome).toBe("commit-failure");
+  }, 30000);
+
+  // VI-7: extendForResume resumePoint — loop executes the resume turn and produces non-error outcome
+  test("extendForResume resumePoint: loop executes turn 2 and produces non-error outcome", async () => {
+    const cwd = await makeGitRepo();
+    const runDir = join(mkdtempSync(join(tmpdir(), "adversary-rundir-vi7-")), "test-run-extend");
+    await initRunDir(runDir);
+    await snapshotPlan(runDir, "# Test Plan VI-7\nExtend for resume.");
+
+    // Pre-populate turn 1 summary so the loop skips it
+    const turn1Dir = join(runDir, "turn-1");
+    mkdirSync(turn1Dir, { recursive: true });
+    const turn1Summary: TurnResult = {
+      turn: 1,
+      implementCommand: "true",
+      verifyCommand: "multi-skill",
+      implementDurationMs: 100,
+      verifyDurationMs: 100,
+      repoChanged: false,
+      commitSha: undefined,
+      verifyStatus: "ok",
+      thresholdFindings: [],
+      belowThresholdFindings: [],
+      outcome: "clean",
+    };
+    writeFileSync(join(turn1Dir, "turn-summary.json"), JSON.stringify(turn1Summary));
+
+    const state: RunState = {
+      runDir,
+      planFile: join(runDir, "plan.txt"),
+      planTitle: "Test Plan VI-7",
+      branch: "adversary/test-branch",
+      baseBranch: "main",
+      startedAt: new Date().toISOString(),
+      turns: [turn1Summary],
+    };
+
+    const config = makeConfig(cwd, { findings: [], verifyStatus: "ok", summarizerName: "fake-summarizer-vi7.sh" });
+
+    // extendForResume=true, turn=2: caller (resumeCommand) already bumped maxTurns to 2.
+    // We pass maxTurns=2 directly to simulate the pre-bumped value.
+    await runLoop({
+      cwd,
+      state,
+      planContent: "# Test Plan VI-7\nExtend for resume.",
+      maxTurns: 2,  // pre-bumped by caller (resumeCommand adds +1 for extendForResume)
+      threshold: 7,
+      config,
+      resumePoint: { turn: 2, skipImplement: false, skipVerify: false, extendForResume: true },
+    });
+
+    // Loop should have run turn 2 (extendForResume bumps the cap)
+    expect(state.turns.length).toBeGreaterThanOrEqual(2);
+    // State outcome must be a valid non-error outcome (clean, capped, or a failure)
+    expect(state.outcome).toBeDefined();
+    expect(["clean", "capped", "implement-failure", "commit-failure", "verify-failure", "verify-error", "summarizer-failure"]).toContain(state.outcome ?? "");
   }, 30000);
 });

@@ -7,7 +7,7 @@ import { getGlobalConfigPath, resolveGitRoot } from "./paths.js";
 const CONFIG_FILENAME = ".adversary.json";
 const LEGACY_CONFIG_FILENAME = ".pi-adversary.json";
 
-function parseConfigLayer(raw: Record<string, unknown>): Partial<AdversaryConfig> {
+export function parseConfigLayer(raw: Record<string, unknown>): Partial<AdversaryConfig> {
   const layer: Partial<AdversaryConfig> = {};
   if (typeof raw.baseBranch === "string") layer.baseBranch = raw.baseBranch;
   if (typeof raw.implementCommandTemplate === "string")
@@ -122,6 +122,26 @@ async function loadLayer(path: string): Promise<Partial<AdversaryConfig>> {
   }
 
   return parseConfigLayer(raw);
+}
+
+export function diffConfigs(
+  saved: Partial<AdversaryConfig>,
+  live: AdversaryConfig
+): Array<{ key: string; saved: unknown; live: unknown }> {
+  const diffs: Array<{ key: string; saved: unknown; live: unknown }> = [];
+  const savedRec = saved as unknown as Record<string, unknown>;
+  const liveRec = live as unknown as Record<string, unknown>;
+  const keys = new Set([...Object.keys(savedRec), ...Object.keys(liveRec)]);
+  for (const key of keys) {
+    const savedVal = savedRec[key];
+    const liveVal = liveRec[key];
+    const savedStr = JSON.stringify(savedVal);
+    const liveStr = JSON.stringify(liveVal);
+    if (savedStr !== liveStr) {
+      diffs.push({ key, saved: savedVal, live: liveVal });
+    }
+  }
+  return diffs;
 }
 
 export async function loadConfig(cwd: string, overridePath?: string): Promise<AdversaryConfig> {

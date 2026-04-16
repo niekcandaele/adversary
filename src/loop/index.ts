@@ -5,7 +5,9 @@ import type {
   VerifyReport,
   TurnResult,
   RunState,
+  RunOutcome,
   TemplateVars,
+  ResumePoint,
 } from "../types/index.js";
 import { runStep } from "../runner/index.js";
 import { hasChanges, commitAll, GitError } from "../git/index.js";
@@ -16,7 +18,7 @@ import {
   generateHistoryFile,
 } from "../prompts/index.js";
 import { generateCommitMessage } from "../summarizer/index.js";
-import { writeText, writeJsonFile, ensureDir } from "../utils/fs.js";
+import { writeText, writeJsonFile, ensureDir, readJsonFile } from "../utils/fs.js";
 import { interpolate } from "../utils/slugify.js";
 import { formatFindingsTable } from "../ui/findingsTable.js";
 import { detectScope } from "../scope/index.js";
@@ -73,10 +75,46 @@ export async function runLoop(options: {
   config: AdversaryConfig;
   /** Optional env override for spawned subprocesses. Defaults to process.env. */
   env?: NodeJS.ProcessEnv;
+  /** Optional resume point — used when resuming an interrupted run. */
+  resumePoint?: ResumePoint;
 }): Promise<RunState> {
   const { cwd, state, planContent, maxTurns, threshold, config } = options;
 
-  for (let turn = 1; turn <= maxTurns; turn++) {
+  const startTurn = options.resumePoint?.turn ?? 1;
+  // effectiveMaxTurns is passed in from the caller (resumeCommand bumps it for extendForResume).
+  // runLoop does NOT bump again — only ONE place should bump to avoid double-counting.
+  const effectiveMaxTurns = maxTurns;
+
+  // If skipLoop is set, the run already reached a terminal outcome — skip the loop
+  if (options.resumePoint?.skipLoop) {
+    process.stdout.write(`\n[Resume] Highest turn already completed with a terminal outcome — skipping loop\n`);
+    // Copy the terminal outcome from the last completed turn so post-loop phases and
+    // done.flag writing work correctly. skipLoop is only set when the last turn had
+    // "clean" or "capped" outcome, both of which are valid RunOutcome values.
+    if (!state.outcome) {
+      const lastTurn = state.turns[state.turns.length - 1];
+      if (!lastTurn) {
+        throw new Error("skipLoop is set but no completed turns found in state — cannot determine outcome");
+      }
+      if (lastTurn.outcome === "continue") {
+        throw new Error(`skipLoop is set but last turn outcome is "continue" — this is a bug in computeResumePoint`);
+      }
+      state.outcome = lastTurn.outcome as RunOutcome;
+    }
+    return state;
+  }
+
+  // VI-13: Detect startTurn > maxTurns. This would be a logic error — either the resume
+  // point is wrong or maxTurns was decreased (caller already bumps for extendForResume).
+  if (startTurn > effectiveMaxTurns) {
+    throw new Error(
+      `Resume error: startTurn (${startTurn}) exceeds maxTurns (${maxTurns}). ` +
+        `Cannot resume — the run has no more turns available. ` +
+        `The saved run config may have been modified. Start a fresh run with: adversary run --plan <plan>`
+    );
+  }
+
+  for (let turn = startTurn; turn <= effectiveMaxTurns; turn++) {
     const turnDir = join(state.runDir, `turn-${turn}`);
     await ensureDir(turnDir);
 
@@ -93,36 +131,47 @@ export async function runLoop(options: {
       process.stderr.write("  Warning: no repo guidance discovered; continuing with generic prompts\n");
     }
 
-    // 1. Generate prompt files
+    // Determine if this is the resume turn and whether to skip phases
+    const isResumeTurn = turn === startTurn && options.resumePoint !== undefined;
+    const skipImplement = isResumeTurn && (options.resumePoint?.skipImplement ?? false);
+    const skipVerify = isResumeTurn && (options.resumePoint?.skipVerify ?? false);
+    // Only prepend the resume note when the user chose the dirty-tree "keep" path
+    const resumeNote = isResumeTurn && (options.resumePoint?.resumeNote ?? false);
+
+    // 1. Generate prompt files (skip if resuming with an existing commit)
     const priorTurns = state.turns;
     const historyPath = vars.historyFile;
     await generateHistoryFile(priorTurns, historyPath);
 
     const promptPath = vars.promptFile;
-    if (turn === 1) {
-      await generateFirstTurnPrompt({
-        planContent,
-        threshold,
-        turn,
-        maxTurns,
-        branch: state.branch,
-        repoGuidance,
-        outputPath: promptPath,
-      });
-    } else {
-      const lastTurn = priorTurns[priorTurns.length - 1];
-      const thresholdFindings = lastTurn?.thresholdFindings ?? [];
-      await generateLaterTurnPrompt({
-        planContent,
-        threshold,
-        turn,
-        maxTurns,
-        branch: state.branch,
-        thresholdFindings,
-        commitError: lastTurn?.commitError,
-        repoGuidance,
-        outputPath: promptPath,
-      });
+    if (!skipImplement) {
+      if (turn === 1) {
+        await generateFirstTurnPrompt({
+          planContent,
+          threshold,
+          turn,
+          maxTurns,
+          branch: state.branch,
+          repoGuidance,
+          outputPath: promptPath,
+          resumeNote,
+        });
+      } else {
+        const lastTurn = priorTurns[priorTurns.length - 1];
+        const thresholdFindings = lastTurn?.thresholdFindings ?? [];
+        await generateLaterTurnPrompt({
+          planContent,
+          threshold,
+          turn,
+          maxTurns,
+          branch: state.branch,
+          thresholdFindings,
+          commitError: lastTurn?.commitError,
+          repoGuidance,
+          outputPath: promptPath,
+          resumeNote,
+        });
+      }
     }
 
     // Also generate findings file for reference
@@ -134,110 +183,127 @@ export async function runLoop(options: {
     const implementCommand = interpolate(config.implementCommandTemplate, vars);
     await writeText(join(turnDir, "implement-command.txt"), implementCommand);
 
-    // 3. Run implement
-    const implResult = await runStep({
-      command: implementCommand,
-      cwd,
-      stdoutPath: join(turnDir, "implement.stdout.log"),
-      stderrPath: join(turnDir, "implement.stderr.log"),
-      timeoutMs: config.implementTimeoutMs,
-      label: "implement",
-      env: options.env,
-    });
+    // Variables to track implement phase result
+    let implDurationMs = 0;
+    let resumedCommitSha: string | undefined = options.resumePoint?.knownCommitSha;
 
-    if (!implResult.success) {
-      const turnResult: TurnResult = {
-        turn,
-        implementCommand,
-        verifyCommand: "",
-        implementDurationMs: implResult.durationMs,
-        verifyDurationMs: 0,
-        repoChanged: false,
-        verifyStatus: "skipped",
-        thresholdFindings: [],
-        belowThresholdFindings: [],
-        outcome: "implement-failure",
-      };
-      state.turns.push(turnResult);
-      await writeTurnSummary(turnDir, turnResult);
-      state.outcome = "implement-failure";
-      return state;
-    }
+    if (skipImplement) {
+      process.stdout.write(`  [Resume] Skipping implement — commit already exists (${resumedCommitSha?.slice(0, 8) ?? "unknown"})\n`);
+    } else {
+      // 3. Run implement
+      const implResult = await runStep({
+        command: implementCommand,
+        cwd,
+        stdoutPath: join(turnDir, "implement.stdout.log"),
+        stderrPath: join(turnDir, "implement.stderr.log"),
+        timeoutMs: config.implementTimeoutMs,
+        label: "implement",
+        env: options.env,
+      });
 
-    // 4. Commit if repo changed
-    let commitSha: string | undefined;
-    let commitMessage: string | undefined;
-    let turnSummary: string | undefined;
-    const repoChanged = await hasChanges(cwd);
-    if (repoChanged) {
-      try {
-        const summarizerResult = await generateCommitMessage({
-          config,
-          turnDir,
-          branch: state.branch,
-          planTitle: state.planTitle,
-          turn,
-          cwd,
-          env: options.env,
-        });
-        commitMessage = summarizerResult.commitMessage;
-        turnSummary = summarizerResult.turnSummary;
-      } catch (e) {
-        process.stderr.write(`  Commit message generation failed: ${e}\n`);
-        process.stderr.write(
-          `  NOTE: Implement step made changes that remain uncommitted. Inspect the working tree before retrying.\n`
-        );
+      implDurationMs = implResult.durationMs;
+
+      if (!implResult.success) {
         const turnResult: TurnResult = {
           turn,
           implementCommand,
           verifyCommand: "",
-          implementDurationMs: implResult.durationMs,
+          implementDurationMs: implDurationMs,
           verifyDurationMs: 0,
-          repoChanged: true,
+          repoChanged: false,
           verifyStatus: "skipped",
           thresholdFindings: [],
           belowThresholdFindings: [],
-          outcome: "summarizer-failure",
+          outcome: "implement-failure",
         };
         state.turns.push(turnResult);
         await writeTurnSummary(turnDir, turnResult);
-        state.outcome = "summarizer-failure";
+        state.outcome = "implement-failure";
         return state;
       }
+    }
 
-      try {
-        commitSha = await commitAll(commitMessage, cwd);
-      } catch (e) {
-        if (e instanceof GitError) {
-          const errorMsg = e.message;
-          process.stderr.write(`\n  Error: Commit failed (pre-commit hook?): ${errorMsg.slice(0, 500)}\n`);
-          process.stderr.write(`  Changes remain in working tree — next turn will address the issue.\n`);
+    // 4. Commit if repo changed (skip if resuming with existing commit)
+    let commitSha: string | undefined = skipImplement ? resumedCommitSha : undefined;
+    let commitMessage: string | undefined;
+    let turnSummary: string | undefined;
+    let repoChanged: boolean;
+
+    if (skipImplement) {
+      // Implement was already done, commit already exists — treat as changed
+      repoChanged = true;
+    } else {
+      repoChanged = await hasChanges(cwd);
+      if (repoChanged) {
+        try {
+          const summarizerResult = await generateCommitMessage({
+            config,
+            turnDir,
+            branch: state.branch,
+            planTitle: state.planTitle,
+            turn,
+            cwd,
+            env: options.env,
+          });
+          commitMessage = summarizerResult.commitMessage;
+          turnSummary = summarizerResult.turnSummary;
+        } catch (e) {
+          process.stderr.write(`  Commit message generation failed: ${e}\n`);
+          process.stderr.write(
+            `  NOTE: Implement step made changes that remain uncommitted. Inspect the working tree before retrying.\n`
+          );
           const turnResult: TurnResult = {
             turn,
             implementCommand,
             verifyCommand: "",
-            implementDurationMs: implResult.durationMs,
+            implementDurationMs: implDurationMs,
             verifyDurationMs: 0,
             repoChanged: true,
-            commitError: errorMsg,
             verifyStatus: "skipped",
             thresholdFindings: [],
             belowThresholdFindings: [],
-            outcome: "commit-failure",
+            outcome: "summarizer-failure",
           };
           state.turns.push(turnResult);
           await writeTurnSummary(turnDir, turnResult);
-          continue;
+          state.outcome = "summarizer-failure";
+          return state;
         }
-        throw e;
-      }
-      process.stdout.write(`  Committed: ${commitSha.slice(0, 8)}\n`);
 
-      if (turnSummary) {
-        process.stdout.write(`\n  Summary: ${turnSummary}\n`);
+        try {
+          commitSha = await commitAll(commitMessage, cwd);
+        } catch (e) {
+          if (e instanceof GitError) {
+            const errorMsg = e.message;
+            process.stderr.write(`\n  Error: Commit failed (pre-commit hook?): ${errorMsg.slice(0, 500)}\n`);
+            process.stderr.write(`  Changes remain in working tree — next turn will address the issue.\n`);
+            const turnResult: TurnResult = {
+              turn,
+              implementCommand,
+              verifyCommand: "",
+              implementDurationMs: implDurationMs,
+              verifyDurationMs: 0,
+              repoChanged: true,
+              commitError: errorMsg,
+              verifyStatus: "skipped",
+              thresholdFindings: [],
+              belowThresholdFindings: [],
+              outcome: "commit-failure",
+            };
+            state.turns.push(turnResult);
+            await writeTurnSummary(turnDir, turnResult);
+            continue;
+          }
+          throw e;
+        }
+        process.stdout.write(`  Committed: ${commitSha.slice(0, 8)}\n`);
+
+        if (turnSummary) {
+          process.stdout.write(`\n  Summary: ${turnSummary}\n`);
+        }
+      } else {
+        process.stdout.write(`\n  No repo changes after implement — skipping commit.\n`);
       }
-    } else {
-      process.stdout.write(`\n  No repo changes after implement — skipping commit.\n`);
     }
 
     // 5. Scope detection (deterministic)
@@ -248,58 +314,93 @@ export async function runLoop(options: {
 
     let report: VerifyReport;
     const verifyStart = Date.now();
-    try {
-      // 5a. Detect scope
-      const scope = await detectScope(cwd, state.baseBranch);
 
-      // 5b. Discovery (cached after turn 1)
-      const discovery = await runDiscovery({
-        cwd,
-        scope,
-        config,
-        runDir: state.runDir,
-        turnDir,
-        env: options.env,
-      });
-
-      // 5c. Browser automation check (turn 1 only)
-      if (turn === 1) {
-        await checkBrowserAutomation(config.browserAutomation, discovery);
+    if (skipVerify) {
+      process.stdout.write(`  [Resume] Skipping verify — verify.json already exists for this turn\n`);
+      // Read the cached verify.json result; if unreadable, fall through to re-run
+      let cachedReport: VerifyReport | null = null;
+      try {
+        cachedReport = await readJsonFile<VerifyReport>(join(turnDir, "verify.json"));
+      } catch (e) {
+        process.stdout.write(`  [Resume] verify.json not readable (${String(e)}), re-running verify\n`);
       }
+      if (cachedReport) {
+        report = cachedReport;
+      } else {
+        // Fall through to run verify normally
+        try {
+          const scope = await detectScope(cwd, state.baseBranch);
+          const discovery = await runDiscovery({ cwd, scope, config, runDir: state.runDir, turnDir, env: options.env });
+          if (turn === 1) await checkBrowserAutomation(config.browserAutomation, discovery);
+          const guidance = await getCachedRepoGuidance(state.runDir);
+          report = await runVerification({ cwd, turnDir, scope, discovery, planContent, config, repoGuidance: guidance, env: options.env });
+        } catch (e) {
+          process.stderr.write(`  Error: verification pipeline failed: ${e}\n`);
+          const turnResult: TurnResult = {
+            turn, implementCommand, verifyCommand,
+            implementDurationMs: implDurationMs, verifyDurationMs: Date.now() - verifyStart,
+            repoChanged, commitSha, verifyStatus: "error",
+            thresholdFindings: [], belowThresholdFindings: [], outcome: "verify-failure",
+          };
+          state.turns.push(turnResult);
+          await writeTurnSummary(turnDir, turnResult);
+          state.outcome = "verify-failure";
+          return state;
+        }
+      }
+    } else {
+      try {
+        // 5a. Detect scope
+        const scope = await detectScope(cwd, state.baseBranch);
 
-      // 5d. Read cached repo guidance (populated before prompt generation and
-      //     refreshed by runDiscovery when needed).
-      const repoGuidance = await getCachedRepoGuidance(state.runDir);
-      // 5e. Run verification pipeline
-      report = await runVerification({
-        cwd,
-        turnDir,
-        scope,
-        discovery,
-        planContent,
-        config,
-        repoGuidance,
-        env: options.env,
-      });
-    } catch (e) {
-      process.stderr.write(`  Error: verification pipeline failed: ${e}\n`);
-      const turnResult: TurnResult = {
-        turn,
-        implementCommand,
-        verifyCommand,
-        implementDurationMs: implResult.durationMs,
-        verifyDurationMs: Date.now() - verifyStart,
-        repoChanged,
-        commitSha,
-        verifyStatus: "error",
-        thresholdFindings: [],
-        belowThresholdFindings: [],
-        outcome: "verify-failure",
-      };
-      state.turns.push(turnResult);
-      await writeTurnSummary(turnDir, turnResult);
-      state.outcome = "verify-failure";
-      return state;
+        // 5b. Discovery (cached after turn 1)
+        const discovery = await runDiscovery({
+          cwd,
+          scope,
+          config,
+          runDir: state.runDir,
+          turnDir,
+          env: options.env,
+        });
+
+        // 5c. Browser automation check (turn 1 only)
+        if (turn === 1) {
+          await checkBrowserAutomation(config.browserAutomation, discovery);
+        }
+
+        // 5d. Read cached repo guidance
+        const repoGuidance = await getCachedRepoGuidance(state.runDir);
+        // 5e. Run verification pipeline
+        report = await runVerification({
+          cwd,
+          turnDir,
+          scope,
+          discovery,
+          planContent,
+          config,
+          repoGuidance,
+          env: options.env,
+        });
+      } catch (e) {
+        process.stderr.write(`  Error: verification pipeline failed: ${e}\n`);
+        const turnResult: TurnResult = {
+          turn,
+          implementCommand,
+          verifyCommand,
+          implementDurationMs: implDurationMs,
+          verifyDurationMs: Date.now() - verifyStart,
+          repoChanged,
+          commitSha,
+          verifyStatus: "error",
+          thresholdFindings: [],
+          belowThresholdFindings: [],
+          outcome: "verify-failure",
+        };
+        state.turns.push(turnResult);
+        await writeTurnSummary(turnDir, turnResult);
+        state.outcome = "verify-failure";
+        return state;
+      }
     }
 
     const verifyDurationMs = Date.now() - verifyStart;
@@ -312,7 +413,7 @@ export async function runLoop(options: {
         turn,
         implementCommand,
         verifyCommand,
-        implementDurationMs: implResult.durationMs,
+        implementDurationMs: implDurationMs,
         verifyDurationMs,
         repoChanged,
         commitSha,
@@ -351,7 +452,7 @@ export async function runLoop(options: {
       turn,
       implementCommand,
       verifyCommand,
-      implementDurationMs: implResult.durationMs,
+      implementDurationMs: implDurationMs,
       verifyDurationMs,
       repoChanged,
       commitSha,

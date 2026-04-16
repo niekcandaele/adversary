@@ -1,6 +1,7 @@
 import { runCommand } from "./run.js";
 import { configCommand } from "./config.js";
-import type { RunOptions } from "../types/index.js";
+import { resumeCommand } from "./resume.js";
+import type { RunOptions, ResumeOptions } from "../types/index.js";
 import { VERSION } from "../generated/version.js";
 
 const KNOWN_FLAGS = new Set([
@@ -13,6 +14,25 @@ const KNOWN_FLAGS = new Set([
   "h",
   "version",
   "v",
+  // resume command flags
+  "run-id",
+  "yes",
+  "y",
+]);
+
+/**
+ * Boolean-only long flags: these flags NEVER consume the next token as a value.
+ * Without this set, `--yes some-run-id` would set options.yes = "some-run-id"
+ * instead of options.yes = true and treating "some-run-id" as a positional.
+ *
+ * IMPORTANT: When adding a new boolean flag, add it to BOTH KNOWN_FLAGS (above)
+ * AND BOOLEAN_FLAGS (here). Omitting it from BOOLEAN_FLAGS will cause the parser
+ * to silently consume the next positional argument as the flag's value.
+ */
+const BOOLEAN_FLAGS = new Set([
+  "yes",
+  "help",
+  "version",
 ]);
 
 function printHelp(): void {
@@ -21,9 +41,11 @@ adversary — adversarial implement→verify loop orchestrator
 
 Usage:
   adversary run --plan <path> [options]
+  adversary resume [run-id] [options]
 
 Commands:
   run      Run the adversarial loop
+  resume   Resume an interrupted run
   config   Print resolved configuration as JSON
 
 Options for 'run':
@@ -33,6 +55,12 @@ Options for 'run':
   --base-branch <branch>        Override base branch (overrides config)
   --config <path>               Path to per-project config file (default: .adversary.json)
                                   See "Config files" section below for merge precedence.
+
+Options for 'resume':
+  [run-id]                      Run ID to resume (default: latest incomplete run)
+  --run-id <id>                 Run ID to resume (alternative to positional arg)
+  --yes, -y                     Skip the terminal-failure confirmation prompt only (does NOT bypass dirty-tree)
+  --config <path>               Path to per-project config file (default: .adversary.json)
 
 Options for 'config':
   --config <path>               Path to per-project config file (default: .adversary.json)
@@ -109,6 +137,8 @@ Timeouts (set via config file — defaults):
 Examples:
   adversary run --plan /path/to/plan.md --turns 6 --severity-threshold 7
   adversary run --plan plan.md --base-branch main --turns 3 --severity-threshold 5
+  adversary resume
+  adversary resume --run-id 20240115T143022-my-plan
   adversary config
   adversary config --config custom.json
 
@@ -140,7 +170,7 @@ export function parseArgs(argv: string[]): {
     } else if (arg.startsWith("--")) {
       const key = arg.slice(2);
       const next = args[i + 1];
-      if (next !== undefined && !next.startsWith("--")) {
+      if (!BOOLEAN_FLAGS.has(key) && next !== undefined && !next.startsWith("--")) {
         options[key] = next;
         i += 2;
       } else {
@@ -218,6 +248,46 @@ async function main(): Promise<void> {
 
     try {
       await runCommand(runOptions);
+    } catch (e) {
+      process.stderr.write(`\nError: ${e instanceof Error ? e.message : String(e)}\n`);
+      process.exit(1);
+    }
+  } else if (command === "resume") {
+    // The positional arg after "resume" is an optional run-id.
+    // We scan the raw argv, skipping option values (e.g. the value after --config).
+    const rawArgs = process.argv.slice(3); // after "resume"
+    let runId: string | undefined = options["run-id"] ? (options["run-id"] as string) : undefined;
+
+    // Flags that consume the following token as their value — skip those tokens.
+    // Derived from KNOWN_FLAGS minus BOOLEAN_FLAGS, so it stays in sync automatically.
+    const flagsWithValue = new Set(
+      [...KNOWN_FLAGS].filter((f) => !BOOLEAN_FLAGS.has(f)).map((f) => `--${f}`)
+    );
+
+    if (!runId) {
+      let i = 0;
+      while (i < rawArgs.length) {
+        const arg = rawArgs[i]!;
+        if (flagsWithValue.has(arg)) {
+          // Skip this flag and its value
+          i += 2;
+        } else if (arg.startsWith("-")) {
+          i++;
+        } else {
+          runId = arg;
+          break;
+        }
+      }
+    }
+
+    const resumeOptions: ResumeOptions = {
+      runId,
+      configFile: options["config"] ? (options["config"] as string) : undefined,
+      yes: options["yes"] === true || options["y"] === true,
+    };
+
+    try {
+      await resumeCommand(resumeOptions);
     } catch (e) {
       process.stderr.write(`\nError: ${e instanceof Error ? e.message : String(e)}\n`);
       process.exit(1);

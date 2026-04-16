@@ -1,6 +1,6 @@
 import { test, expect, describe } from "bun:test";
 import { parseArgs } from "../src/cli/index.js";
-import { validateRunOptions } from "../src/cli/run.js";
+import { validateRunOptions, isFailureOutcome } from "../src/cli/run.js";
 
 describe("parseArgs", () => {
   test("parses run command with required --plan flag", () => {
@@ -129,5 +129,109 @@ describe("validateRunOptions", () => {
     expect(() =>
       validateRunOptions({ plan: "plan.md", turns: 5, severityThreshold: 10 })
     ).not.toThrow();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VI-1(a): isFailureOutcome — push-failure must be treated as failure
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("isFailureOutcome (VI-1a)", () => {
+  test("returns true for push-failure", () => {
+    expect(isFailureOutcome("push-failure")).toBe(true);
+  });
+
+  test("returns true for commit-failure", () => {
+    expect(isFailureOutcome("commit-failure")).toBe(true);
+  });
+
+  test("returns true for implement-failure", () => {
+    expect(isFailureOutcome("implement-failure")).toBe(true);
+  });
+
+  test("returns true for summarizer-failure", () => {
+    expect(isFailureOutcome("summarizer-failure")).toBe(true);
+  });
+
+  test("returns true for verify-failure", () => {
+    expect(isFailureOutcome("verify-failure")).toBe(true);
+  });
+
+  test("returns true for verify-error", () => {
+    expect(isFailureOutcome("verify-error")).toBe(true);
+  });
+
+  test("returns false for clean", () => {
+    expect(isFailureOutcome("clean")).toBe(false);
+  });
+
+  test("returns false for capped", () => {
+    expect(isFailureOutcome("capped")).toBe(false);
+  });
+
+  test("returns false for undefined", () => {
+    expect(isFailureOutcome(undefined)).toBe(false);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VI-2: parseArgs --yes and -y flags for resume command
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("parseArgs — resume --yes / -y flags (VI-2)", () => {
+  test("parses --yes flag for resume command", () => {
+    const { command, options } = parseArgs(["node", "adversary", "resume", "--yes"]);
+    expect(command).toBe("resume");
+    expect(options["yes"]).toBe(true);
+  });
+
+  test("parses -y flag for resume command", () => {
+    const { command, options } = parseArgs(["node", "adversary", "resume", "-y"]);
+    expect(command).toBe("resume");
+    expect(options["y"]).toBe(true);
+  });
+
+  test("--yes is not in unknownFlags", () => {
+    const { unknownFlags } = parseArgs(["node", "adversary", "resume", "--yes"]);
+    expect(unknownFlags).not.toContain("--yes");
+  });
+
+  test("-y is not in unknownFlags", () => {
+    const { unknownFlags } = parseArgs(["node", "adversary", "resume", "-y"]);
+    expect(unknownFlags).not.toContain("-y");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VI-1: parseArgs --yes with positional run-id should not consume run-id as --yes value
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("parseArgs — VI-1: --yes does not consume positional run-id", () => {
+  test("resume --yes some-run-id: options.yes === true (not the run-id string)", () => {
+    const { command, options } = parseArgs(["node", "adversary", "resume", "--yes", "some-run-id"]);
+    expect(command).toBe("resume");
+    // --yes must be boolean true, NOT the run-id string
+    expect(options["yes"]).toBe(true);
+    // run-id should not appear as the value of --yes
+    expect(options["yes"]).not.toBe("some-run-id");
+  });
+
+  test("resume --yes some-run-id: run-id is NOT captured in options (it stays as positional)", () => {
+    const { options } = parseArgs(["node", "adversary", "resume", "--yes", "some-run-id"]);
+    // 'some-run-id' is not a flag value — it should be treated as a positional (not in options)
+    expect(options["yes"]).toBe(true);
+    // The run-id 'some-run-id' should not appear anywhere as a flag value
+    expect(Object.values(options)).not.toContain("some-run-id");
+  });
+
+  test("resume --yes: options.yes === true when no positional follows", () => {
+    const { options } = parseArgs(["node", "adversary", "resume", "--yes"]);
+    expect(options["yes"]).toBe(true);
+  });
+
+  test("resume some-run-id --yes: options.yes === true regardless of order", () => {
+    const { command, options } = parseArgs(["node", "adversary", "resume", "some-run-id", "--yes"]);
+    expect(command).toBe("resume");
+    expect(options["yes"]).toBe(true);
   });
 });
