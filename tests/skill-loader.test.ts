@@ -18,13 +18,12 @@ describe("loadSkillTemplate", () => {
     const skills = [
       "reviewer",
       "qa",
-      "tester",
-      "static-analysis",
       "ux-reviewer",
       "exerciser",
       "plan-completeness",
       "discovery",
       "synthesis",
+      "command-analyzer",
     ];
     for (const skill of skills) {
       const template = await loadSkillTemplate(skill);
@@ -33,8 +32,8 @@ describe("loadSkillTemplate", () => {
   });
 
   test("vendored templates contain required placeholders", async () => {
-    // Core skills should have the scope/discovery context placeholders
-    const coreSkills = ["reviewer", "qa", "tester", "static-analysis", "ux-reviewer"];
+    // Core LLM skills should have the scope/discovery context placeholders
+    const coreSkills = ["reviewer", "qa", "ux-reviewer"];
     for (const skill of coreSkills) {
       const template = await loadSkillTemplate(skill);
       expect(template).toContain("{scopeContext}");
@@ -52,21 +51,20 @@ describe("loadSkillTemplate", () => {
     expect(template).toContain("{planContent}");
   });
 
-  test("synthesis template has skillFindings placeholder", async () => {
+  test("synthesis template has stepsJson placeholder", async () => {
     const template = await loadSkillTemplate("synthesis");
-    expect(template).toContain("{skillFindings}");
+    expect(template).toContain("{stepsJson}");
   });
 
   test("all skill templates have JSON output format section", async () => {
     const skills = [
       "reviewer",
       "qa",
-      "tester",
-      "static-analysis",
       "ux-reviewer",
       "exerciser",
       "plan-completeness",
       "synthesis",
+      "command-analyzer",
     ];
     for (const skill of skills) {
       const template = await loadSkillTemplate(skill);

@@ -6,7 +6,15 @@ import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
-import { discoverProjectSkills, normalizeDiscovery, getCachedProjectSkills, runDiscovery } from "../src/discovery/index.js";
+import {
+  cacheRepoGuidance,
+  discoverProjectSkills,
+  discoverRepoDocs,
+  normalizeDiscovery,
+  getCachedProjectSkills,
+  getCachedRepoGuidance,
+  runDiscovery,
+} from "../src/discovery/index.js";
 import { writeFileSync } from "node:fs";
 import type { AdversaryConfig, VerifyScope } from "../src/types/index.js";
 
@@ -83,6 +91,35 @@ describe("discoverProjectSkills", () => {
   });
 });
 
+describe("discoverRepoDocs", () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), "adversary-repodocs-test-"));
+  });
+
+  afterEach(async () => {
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  test("returns empty string when no repo docs exist", async () => {
+    const result = await discoverRepoDocs(tmpDir);
+    expect(result).toBe("");
+  });
+
+  test("includes AGENTS.md and CLAUDE.md when present", async () => {
+    await writeFile(join(tmpDir, "AGENTS.md"), "# Agents\nUse the house style.");
+    await writeFile(join(tmpDir, "CLAUDE.md"), "# Claude\nCheck repo conventions.");
+
+    const result = await discoverRepoDocs(tmpDir);
+    expect(result).toContain("## Repo Docs");
+    expect(result).toContain("AGENTS.md");
+    expect(result).toContain("Use the house style.");
+    expect(result).toContain("CLAUDE.md");
+    expect(result).toContain("Check repo conventions.");
+  });
+});
+
 describe("normalizeDiscovery", () => {
   test("non-object input returns fallback discovery", () => {
     const result = normalizeDiscovery("a string");
@@ -139,8 +176,8 @@ describe("normalizeDiscovery", () => {
   });
 });
 
-// VI-8: getCachedProjectSkills tests
-describe("getCachedProjectSkills", () => {
+// VI-8: cached repo guidance tests
+describe("cached repo guidance", () => {
   let tmpDir: string;
 
   beforeEach(async () => {
@@ -152,15 +189,30 @@ describe("getCachedProjectSkills", () => {
   });
 
   test("returns empty string when cache file does not exist", async () => {
-    const result = await getCachedProjectSkills(tmpDir);
-    expect(result).toBe("");
+    expect(await getCachedProjectSkills(tmpDir)).toBe("");
+    expect(await getCachedRepoGuidance(tmpDir)).toBe("");
   });
 
-  test("returns cached content when cache file exists", async () => {
+  test("returns cached content when cache files exist", async () => {
     const cacheContent = "## Project Skills\n\n### .claude/skills/my-skill/SKILL.md\n\n# My Skill\nDo things.";
+    const repoGuidance = `${cacheContent}\n\n---\n\n## Repo Docs\n\n### AGENTS.md\n\nFollow the repo rules.`;
     await writeFile(join(tmpDir, "projectSkills.txt"), cacheContent);
-    const result = await getCachedProjectSkills(tmpDir);
-    expect(result).toBe(cacheContent);
+    await writeFile(join(tmpDir, "repoGuidance.txt"), repoGuidance);
+    expect(await getCachedProjectSkills(tmpDir)).toBe(cacheContent);
+    expect(await getCachedRepoGuidance(tmpDir)).toBe(repoGuidance);
+  });
+
+  test("cacheRepoGuidance writes both project skills and repo guidance", async () => {
+    await mkdir(join(tmpDir, ".claude", "skills", "my-skill"), { recursive: true });
+    await writeFile(join(tmpDir, ".claude", "skills", "my-skill", "SKILL.md"), "# My Skill\nFollow the skill.");
+    await writeFile(join(tmpDir, "AGENTS.md"), "# Agents\nFollow the docs.");
+
+    const result = await cacheRepoGuidance(tmpDir, tmpDir);
+    expect(result.projectSkills).toContain("My Skill");
+    expect(result.repoGuidance).toContain("My Skill");
+    expect(result.repoGuidance).toContain("Follow the docs.");
+    expect(await getCachedProjectSkills(tmpDir)).toContain("My Skill");
+    expect(await getCachedRepoGuidance(tmpDir)).toContain("Follow the docs.");
   });
 });
 
@@ -191,6 +243,7 @@ describe("runDiscovery", () => {
       summarizerCommandTemplate: "true",
       implementTimeoutMs: 10000,
       verifyTimeoutMs: 10000,
+      testTimeoutMs: 30000,
       prTimeoutMs: 10000,
       summarizerTimeoutMs: 10000,
       browserAutomation: "warn",
@@ -210,6 +263,8 @@ describe("runDiscovery", () => {
       browserDeps: [],
     };
     await writeFile(join(tmpDir, "discovery.json"), JSON.stringify(cachedDiscovery));
+    await writeFile(join(tmpDir, "projectSkills.txt"), "## Project Skills\n\nAlready cached.");
+    await writeFile(join(tmpDir, "repoGuidance.txt"), "## Repo Docs\n\nAlready cached.");
 
     // Harness that would fail if actually invoked
     const config = makeConfig("false");
@@ -284,6 +339,8 @@ describe("runDiscovery", () => {
     // Cache file should now exist
     const cacheExists = (await Bun.file(join(runDir, "discovery.json")).exists());
     expect(cacheExists).toBe(true);
+    expect(await Bun.file(join(runDir, "projectSkills.txt")).exists()).toBe(true);
+    expect(await Bun.file(join(runDir, "repoGuidance.txt")).exists()).toBe(true);
   });
 
   // VI-10: gatherProjectStructure truncation path

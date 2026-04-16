@@ -14,7 +14,7 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { runLoop } from "../src/loop/index.js";
 import type { RunState, AdversaryConfig } from "../src/types/index.js";
@@ -206,6 +206,37 @@ describe("runLoop integration", () => {
     expect(summary.turn).toBe(1);
   }, 60000);
 
+  test("turn 1 implement prompt includes cached repo guidance", async () => {
+    const cwd = await makeGitRepo();
+    writeFileSync(join(cwd, "AGENTS.md"), "# Repo Rules\nKeep changes aligned with the repo.");
+    const skillDir = join(cwd, ".claude", "skills", "repo-style");
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(join(skillDir, "SKILL.md"), "# Repo Skill\nAlways follow the house style.");
+
+    const runDir = join(cwd, ".test-runs", "test-run-guidance");
+    await initRunDir(runDir);
+    await snapshotPlan(runDir, "# Guided Plan\nDo a thing.");
+
+    const state: RunState = {
+      runDir,
+      planFile: join(runDir, "plan.txt"),
+      planTitle: "Guided Plan",
+      branch: "adversary/test-branch",
+      baseBranch: "main",
+      startedAt: new Date().toISOString(),
+      turns: [],
+    };
+
+    const config = makeConfig(cwd, { findings: [], verifyStatus: "ok", summarizerName: "fake-summarizer-guidance.sh" });
+
+    await runLoop({ cwd, state, planContent: "# Guided Plan\nDo a thing.", maxTurns: 1, threshold: 7, config });
+
+    const prompt = readFileSync(join(runDir, "turn-1", "implement-input.md"), "utf8");
+    expect(prompt).toContain("Repo Guidance");
+    expect(prompt).toContain("Repo Skill");
+    expect(prompt).toContain("Keep changes aligned with the repo.");
+  }, 60000);
+
   test("terminates capped when max turns reached with findings remaining", async () => {
     const cwd = await makeGitRepo();
     const runDir = join(cwd, ".test-runs", "test-run-2");
@@ -263,7 +294,7 @@ describe("runLoop integration", () => {
     expect(state.turns[0]?.outcome).toBe("implement-failure");
   }, 30000);
 
-  test("sets verify-error outcome when verify reports status=error", async () => {
+  test("treats synthesized status=error with valid findings as a normal threshold-driven verify result", async () => {
     const cwd = await makeGitRepo();
     const runDir = join(cwd, ".test-runs", "test-run-error");
     await initRunDir(runDir);
@@ -287,11 +318,14 @@ describe("runLoop integration", () => {
 
     await runLoop({ cwd, state, planContent: "# Test Plan Error\nDo a thing.", maxTurns: 3, threshold: 7, config });
 
-    expect(state.outcome).toBe("verify-error");
-    expect(state.turns).toHaveLength(1);
-    expect(state.turns[0]?.outcome).toBe("verify-error");
-    expect(state.turns[0]?.verifyStatus).toBe("error");
-    // findings from error verify should still be recorded
+    expect(state.outcome).toBe("capped");
+    expect(state.turns).toHaveLength(3);
+    expect(state.turns[0]?.outcome).toBe("continue");
+    expect(state.turns[0]?.verifyStatus).toBe("ok");
+    expect(state.turns[1]?.outcome).toBe("continue");
+    expect(state.turns[1]?.verifyStatus).toBe("ok");
+    expect(state.turns[2]?.outcome).toBe("capped");
+    expect(state.turns[2]?.verifyStatus).toBe("ok");
     expect(state.turns[0]?.thresholdFindings).toHaveLength(1);
     expect(state.turns[0]?.thresholdFindings[0]?.title).toBe("Error Issue");
   }, 60000);
@@ -390,7 +424,10 @@ describe("runLoop integration", () => {
     expect(state.turns[0]?.outcome).toBe("summarizer-failure");
   }, 30000);
 
-  test("sets verify-blocked outcome when verify reports status=blocked", async () => {
+  test("synthesis returning blocked status is treated as fallback (blocked no longer stops the loop)", async () => {
+    // "blocked" is no longer a valid synthesis status. When the harness returns blocked,
+    // the orchestrator uses deterministic synthesis fallback which returns "ok" (no skill errors).
+    // The loop proceeds normally based on threshold findings.
     const cwd = await makeGitRepo();
     const runDir = join(cwd, ".test-runs", "test-run-blocked");
     await initRunDir(runDir);
@@ -412,15 +449,10 @@ describe("runLoop integration", () => {
       summarizerName: "fake-summarizer-blocked.sh",
     });
 
-    await runLoop({ cwd, state, planContent: "# Test Plan Blocked\nDo a thing.", maxTurns: 3, threshold: 7, config });
+    await runLoop({ cwd, state, planContent: "# Test Plan Blocked\nDo a thing.", maxTurns: 1, threshold: 7, config });
 
-    expect(state.outcome).toBe("verify-blocked");
-    expect(state.turns).toHaveLength(1);
-    expect(state.turns[0]?.outcome).toBe("verify-blocked");
-    expect(state.turns[0]?.verifyStatus).toBe("blocked");
-    // findings from blocked verify should still be recorded
-    expect(state.turns[0]?.thresholdFindings).toHaveLength(1);
-    expect(state.turns[0]?.thresholdFindings[0]?.title).toBe("Blocking Issue");
+    // No longer stops with verify-blocked — loop handles findings via threshold
+    expect(state.outcome).not.toBe("verify-blocked");
   }, 60000);
 
   test("recovers from commit failure caused by pre-commit hook", async () => {

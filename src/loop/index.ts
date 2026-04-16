@@ -20,7 +20,7 @@ import { writeText, writeJsonFile, ensureDir } from "../utils/fs.js";
 import { interpolate } from "../utils/slugify.js";
 import { formatFindingsTable } from "../ui/findingsTable.js";
 import { detectScope } from "../scope/index.js";
-import { runDiscovery, getCachedProjectSkills } from "../discovery/index.js";
+import { cacheRepoGuidance, getCachedRepoGuidance, runDiscovery } from "../discovery/index.js";
 import { checkBrowserAutomation } from "../preflight/index.js";
 import { runVerification } from "../verify/index.js";
 
@@ -86,6 +86,13 @@ export async function runLoop(options: {
 
     const vars = buildTemplateVars(cwd, turnDir, state, turn, maxTurns, threshold);
 
+    // Make repo guidance available before prompt generation so turn 1 gets
+    // the same repo-specific context that verify already sees.
+    const { repoGuidance } = await cacheRepoGuidance(cwd, state.runDir);
+    if (turn === 1 && !repoGuidance.trim()) {
+      process.stderr.write("  Warning: no repo guidance discovered; continuing with generic prompts\n");
+    }
+
     // 1. Generate prompt files
     const priorTurns = state.turns;
     const historyPath = vars.historyFile;
@@ -99,12 +106,12 @@ export async function runLoop(options: {
         turn,
         maxTurns,
         branch: state.branch,
+        repoGuidance,
         outputPath: promptPath,
       });
     } else {
       const lastTurn = priorTurns[priorTurns.length - 1];
       const thresholdFindings = lastTurn?.thresholdFindings ?? [];
-      const historyContent = await Bun.file(historyPath).text();
       await generateLaterTurnPrompt({
         planContent,
         threshold,
@@ -113,7 +120,7 @@ export async function runLoop(options: {
         branch: state.branch,
         thresholdFindings,
         commitError: lastTurn?.commitError,
-        historyContent,
+        repoGuidance,
         outputPath: promptPath,
       });
     }
@@ -234,7 +241,7 @@ export async function runLoop(options: {
     }
 
     // 5. Scope detection (deterministic)
-    const verifyCommand = "multi-skill: 6 parallel + exerciser + synthesis";
+    const verifyCommand = "multi-skill: 4 parallel + deterministic commands + exerciser + synthesis";
     await writeText(join(turnDir, "verify-command.txt"), verifyCommand);
 
     process.stdout.write("\n");
@@ -260,10 +267,9 @@ export async function runLoop(options: {
         await checkBrowserAutomation(config.browserAutomation, discovery);
       }
 
-      // 5d. Read cached project skills (populated by runDiscovery on turn 1,
-      //     avoids redundant find commands on every subsequent turn)
-      const projectSkills = await getCachedProjectSkills(state.runDir);
-
+      // 5d. Read cached repo guidance (populated before prompt generation and
+      //     refreshed by runDiscovery when needed).
+      const repoGuidance = await getCachedRepoGuidance(state.runDir);
       // 5e. Run verification pipeline
       report = await runVerification({
         cwd,
@@ -272,7 +278,7 @@ export async function runLoop(options: {
         discovery,
         planContent,
         config,
-        projectSkills,
+        repoGuidance,
         env: options.env,
       });
     } catch (e) {
@@ -298,30 +304,7 @@ export async function runLoop(options: {
 
     const verifyDurationMs = Date.now() - verifyStart;
 
-    // 6. Handle blocked
-    if (report.status === "blocked") {
-      process.stderr.write(`\n[Turn ${turn}] Verify returned status=blocked. Stopping.\n`);
-      const { thresholdFindings, belowThresholdFindings } = filterFindings(report.findings, threshold);
-      const turnResult: TurnResult = {
-        turn,
-        implementCommand,
-        verifyCommand,
-        implementDurationMs: implResult.durationMs,
-        verifyDurationMs,
-        repoChanged,
-        commitSha,
-        verifyStatus: "blocked",
-        thresholdFindings,
-        belowThresholdFindings,
-        outcome: "verify-blocked",
-      };
-      state.turns.push(turnResult);
-      await writeTurnSummary(turnDir, turnResult);
-      state.outcome = "verify-blocked";
-      return state;
-    }
-
-    // 7. Handle error status
+    // 6. Handle error status
     if (report.status === "error") {
       process.stderr.write(`\n[Turn ${turn}] Verify returned status=error. Stopping.\n`);
       const { thresholdFindings, belowThresholdFindings } = filterFindings(report.findings, threshold);

@@ -47,7 +47,6 @@ function outcomeLabel(outcome: RunOutcome | undefined): string {
     case "implement-failure": return "✗ Stopped — implementer step failed";
     case "summarizer-failure": return "✗ Stopped — summarizer step failed";
     case "verify-failure": return "✗ Stopped — verifier step failed";
-    case "verify-blocked": return "✗ Stopped — verifier returned blocked status";
     case "verify-error": return "✗ Stopped — verifier returned error status";
     case "preflight-failure": return "✗ Stopped — preflight check failed";
     case "commit-failure": return "✗ Stopped — commit step failed";

@@ -1,7 +1,3 @@
-/**
- * Tests for the verification orchestrator (src/verify/index.ts)
- * Uses mock harness scripts to verify parallel execution and output collection.
- */
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,11 +17,7 @@ async function makeGitRepo(): Promise<string> {
   await run("git", "config", "user.email", "test@test.com");
   await run("git", "config", "user.name", "Test");
   await writeFile(join(dir, "README.md"), "# Test");
-  const proc = Bun.spawn(["sh", "-c", "git add -A && git commit -m init"], {
-    cwd: dir,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  const proc = Bun.spawn(["sh", "-c", "git add -A && git commit -m init"], { cwd: dir, stdout: "pipe", stderr: "pipe" });
   await proc.exited;
   return dir;
 }
@@ -33,11 +25,9 @@ async function makeGitRepo(): Promise<string> {
 function writeFakeHarness(
   dir: string,
   name: string,
-  opts: { findings?: unknown[]; status?: string } = {}
+  opts: { synthesisFindings?: unknown[]; skillFindings?: unknown[]; synthesisStatus?: "ok" | "error" } = {}
 ): string {
-  const { findings = [], status = "ok" } = opts;
-  const findingsJson = JSON.stringify(findings);
-  const verifyStatus = status;
+  const { synthesisFindings = [], skillFindings = [], synthesisStatus = "ok" } = opts;
   const path = join(dir, name);
   writeFileSync(
     path,
@@ -49,24 +39,24 @@ for arg in "$@"; do
   esac
 done
 
-if [ -z "$PROMPT_FILE" ]; then
-  echo '{"status":"ok","findings":[]}'
-  exit 0
-fi
-
 CONTENT=$(cat "$PROMPT_FILE" 2>/dev/null || echo "")
 
-if echo "$CONTENT" | grep -q "schemaVersion"; then
-  echo '{"schemaVersion":1,"status":"${verifyStatus}","findings":${findingsJson}}'
+if echo "$CONTENT" | grep -q 'schemaVersion'; then
+  echo '{"schemaVersion":1,"status":"${synthesisStatus}","findings":${JSON.stringify(synthesisFindings)}}'
   exit 0
 fi
 
-if echo "$CONTENT" | grep -q 'testCommand\\|toolchain discovery'; then
-  echo '{"testCommand":null,"buildCommand":null,"lintCommands":[],"typeCheckCommands":[],"startCommand":null,"browserDeps":[]}'
+if echo "$CONTENT" | grep -q 'Branch Verification Context'; then
+  echo '{"status":"completed","findings":${JSON.stringify(skillFindings)}}'
   exit 0
 fi
 
-echo '{"status":"ok","findings":[]}'
+if echo "$CONTENT" | grep -q 'tool-output-analyzer\|deterministic verification failure analyzer'; then
+  echo '{"status":"completed","findings":[]}'
+  exit 0
+fi
+
+echo '{"status":"completed","findings":${JSON.stringify(skillFindings)}}'
 exit 0
 `,
     { mode: 0o755 }
@@ -105,15 +95,9 @@ describe("runVerification orchestrator", () => {
     await rm(cwd, { recursive: true, force: true });
   });
 
-  test("returns ok report when all skills pass with no findings", async () => {
+  test("creates branch-wide verify artifact layout", async () => {
     const turnDir = join(tmpDir, "turn-1");
-    const harness = writeFakeHarness(tmpDir, "fake-harness.sh", { findings: [], status: "ok" });
-
-    const config: AdversaryConfig = {
-      ...DEFAULT_CONFIG,
-      verifyCommandTemplate: `${harness} @{promptFile}`,
-      verifyTimeoutMs: 30000,
-    };
+    const harness = writeFakeHarness(tmpDir, "fake-harness.sh");
 
     const report = await runVerification({
       cwd,
@@ -121,474 +105,48 @@ describe("runVerification orchestrator", () => {
       scope: EMPTY_SCOPE,
       discovery: EMPTY_DISCOVERY,
       planContent: "# Test Plan",
-      config,
-      projectSkills: "",
+      config: { ...DEFAULT_CONFIG, verifyCommandTemplate: `${harness} @{promptFile}` },
+      repoGuidance: "",
     });
 
-    expect(report.schemaVersion).toBe(1);
     expect(report.status).toBe("ok");
-    expect(Array.isArray(report.findings)).toBe(true);
-  }, 120000);
-
-  test("returns findings from synthesis output", async () => {
-    const findings = [
-      { title: "Critical Bug", severity: 9, description: "Big problem", sources: ["reviewer"] },
-    ];
-    const turnDir = join(tmpDir, "turn-2");
-    const harness = writeFakeHarness(tmpDir, "fake-harness-findings.sh", {
-      findings,
-      status: "ok",
-    });
-
-    const config: AdversaryConfig = {
-      ...DEFAULT_CONFIG,
-      verifyCommandTemplate: `${harness} @{promptFile}`,
-      verifyTimeoutMs: 30000,
-    };
-
-    const report = await runVerification({
-      cwd,
-      turnDir,
-      scope: EMPTY_SCOPE,
-      discovery: EMPTY_DISCOVERY,
-      planContent: "# Test Plan",
-      config,
-      projectSkills: "",
-    });
-
-    expect(report.findings).toHaveLength(1);
-    expect(report.findings[0]?.title).toBe("Critical Bug");
-    expect(report.findings[0]?.severity).toBe(9);
-  }, 120000);
-
-  test("creates verify directory structure", async () => {
-    const turnDir = join(tmpDir, "turn-3");
-    const harness = writeFakeHarness(tmpDir, "fake-harness-dirs.sh");
-
-    const config: AdversaryConfig = {
-      ...DEFAULT_CONFIG,
-      verifyCommandTemplate: `${harness} @{promptFile}`,
-      verifyTimeoutMs: 30000,
-    };
-
-    await runVerification({
-      cwd,
-      turnDir,
-      scope: EMPTY_SCOPE,
-      discovery: EMPTY_DISCOVERY,
-      planContent: "# Test Plan",
-      config,
-      projectSkills: "",
-    });
-
-    // Verify directory structure was created
-    const verifyDir = join(turnDir, "verify");
-    expect(existsSync(verifyDir)).toBe(true);
-    expect(existsSync(join(verifyDir, "skills"))).toBe(true);
-
-    // Each skill should have a prompt file
-    expect(existsSync(join(verifyDir, "skills", "reviewer.prompt.md"))).toBe(true);
-    expect(existsSync(join(verifyDir, "skills", "qa.prompt.md"))).toBe(true);
-    expect(existsSync(join(verifyDir, "skills", "tester.prompt.md"))).toBe(true);
-
-    // Synthesis prompt should exist
-    expect(existsSync(join(verifyDir, "synthesis.prompt.md"))).toBe(true);
-
-    // Final verify.json should exist
+    expect(existsSync(join(turnDir, "verify", "branch-context.txt"))).toBe(true);
+    expect(existsSync(join(turnDir, "verify", "steps", "reviewer", "prompt.md"))).toBe(true);
+    expect(existsSync(join(turnDir, "verify", "steps", "qa", "output.json"))).toBe(true);
+    expect(existsSync(join(turnDir, "verify", "steps", "exerciser", "output.json"))).toBe(true);
+    expect(existsSync(join(turnDir, "verify", "synthesis", "prompt.md"))).toBe(true);
     expect(existsSync(join(turnDir, "verify.json"))).toBe(true);
   }, 120000);
 
-  test("handles blocked synthesis status", async () => {
-    const turnDir = join(tmpDir, "turn-blocked");
-    const harness = writeFakeHarness(tmpDir, "fake-harness-blocked.sh", {
-      findings: [{ title: "Blocked Issue", severity: 9, description: "Cannot proceed", sources: ["qa"] }],
-      status: "blocked",
-    });
-
-    const config: AdversaryConfig = {
-      ...DEFAULT_CONFIG,
-      verifyCommandTemplate: `${harness} @{promptFile}`,
-      verifyTimeoutMs: 30000,
-    };
-
-    const report = await runVerification({
-      cwd,
-      turnDir,
-      scope: EMPTY_SCOPE,
-      discovery: EMPTY_DISCOVERY,
-      planContent: "# Test Plan",
-      config,
-      projectSkills: "",
-    });
-
-    expect(report.status).toBe("blocked");
-  }, 120000);
-
-  test("uses fallback synthesis when harness outputs invalid JSON", async () => {
-    const turnDir = join(tmpDir, "turn-invalid");
-    const invalidHarness = join(tmpDir, "invalid-harness.sh");
-    writeFileSync(
-      invalidHarness,
-      `#!/bin/sh\necho "not valid json at all"\nexit 0\n`,
-      { mode: 0o755 }
-    );
-
-    const config: AdversaryConfig = {
-      ...DEFAULT_CONFIG,
-      verifyCommandTemplate: `${invalidHarness} @{promptFile}`,
-      verifyTimeoutMs: 30000,
-    };
-
-    // Should not throw — falls back to deterministic synthesis
-    const report = await runVerification({
-      cwd,
-      turnDir,
-      scope: EMPTY_SCOPE,
-      discovery: EMPTY_DISCOVERY,
-      planContent: "# Test Plan",
-      config,
-      projectSkills: "",
-    });
-
-    expect(report.schemaVersion).toBe(1);
-    expect(["ok", "blocked", "error"]).toContain(report.status);
-    expect(Array.isArray(report.findings)).toBe(true);
-  }, 120000);
-
-  test("prompt files contain interpolated variables (scopeContext, planContent)", async () => {
-    const turnDir = join(tmpDir, "turn-interp");
-    const harness = writeFakeHarness(tmpDir, "fake-harness-interp.sh");
-
-    const config: AdversaryConfig = {
-      ...DEFAULT_CONFIG,
-      verifyCommandTemplate: `${harness} @{promptFile}`,
-      verifyTimeoutMs: 30000,
-    };
+  test("built-in prompts include branch-wide plan context", async () => {
+    const turnDir = join(tmpDir, "turn-2");
+    const harness = writeFakeHarness(tmpDir, "fake-harness-prompt.sh");
 
     await runVerification({
       cwd,
       turnDir,
       scope: EMPTY_SCOPE,
       discovery: EMPTY_DISCOVERY,
-      planContent: "# My Special Test Plan Content",
-      config,
-      projectSkills: "## Project Skills\n\nSome skill info",
+      planContent: "# My Special Plan",
+      config: { ...DEFAULT_CONFIG, verifyCommandTemplate: `${harness} @{promptFile}` },
+      repoGuidance: "## Project Skills\n\nSome skill info\n\n---\n\n## Repo Docs\n\nUse the repo guide.",
     });
 
-    // Check that the reviewer prompt has interpolated scope context
-    const reviewerPromptPath = join(turnDir, "verify", "skills", "reviewer.prompt.md");
-    expect(existsSync(reviewerPromptPath)).toBe(true);
+    const reviewerPrompt = await Bun.file(join(turnDir, "verify", "steps", "reviewer", "prompt.md")).text();
+    expect(reviewerPrompt).toContain("src/test.ts");
+    expect(reviewerPrompt).toContain("Some skill info");
+    const branchContext = await Bun.file(join(turnDir, "verify", "branch-context.txt")).text();
+    expect(branchContext).toContain("Use the repo guide.");
 
-    const reviewerContent = await Bun.file(reviewerPromptPath).text();
-
-    // scopeContext should be interpolated — contains the changed file
-    expect(reviewerContent).toContain("src/test.ts");
-
-    // projectSkills should be interpolated in reviewer prompt
-    expect(reviewerContent).toContain("Some skill info");
-
-    // No un-interpolated {scopeContext} or {projectSkills} placeholders remain
-    expect(reviewerContent).not.toContain("{scopeContext}");
-    expect(reviewerContent).not.toContain("{projectSkills}");
-
-    // Check plan-completeness prompt for planContent interpolation
-    const planPromptPath = join(turnDir, "verify", "skills", "plan-completeness.prompt.md");
-    expect(existsSync(planPromptPath)).toBe(true);
-
-    const planContent = await Bun.file(planPromptPath).text();
-    // planContent should be interpolated in plan-completeness prompt
-    expect(planContent).toContain("My Special Test Plan Content");
-    expect(planContent).not.toContain("{planContent}");
+    const planPrompt = await Bun.file(join(turnDir, "verify", "steps", "plan-completeness", "prompt.md")).text();
+    expect(planPrompt).toContain("My Special Plan");
   }, 120000);
 
-  test("custom sequential steps run after phase 1 skills", async () => {
-    const turnDir = join(tmpDir, "turn-custom-seq");
-    const mainHarness = writeFakeHarness(tmpDir, "fake-harness-seq-main.sh");
-
-    // Custom sequential step that outputs a specific finding
-    const seqHarness = join(tmpDir, "custom-seq-step.sh");
-    writeFileSync(
-      seqHarness,
-      `#!/bin/sh\necho '{"status":"ok","findings":[{"title":"Sequential Finding","severity":6,"description":"From sequential step","sources":["my-seq-check"]}]}'\nexit 0\n`,
-      { mode: 0o755 }
-    );
-
-    const config: AdversaryConfig = {
-      ...DEFAULT_CONFIG,
-      verifyCommandTemplate: `${mainHarness} @{promptFile}`,
-      verifyTimeoutMs: 30000,
-      customVerificationSteps: [
-        {
-          name: "my-seq-check",
-          commandTemplate: `${seqHarness}`,
-          phase: "sequential",
-          timeoutMs: 10000,
-        },
-      ],
-    };
-
-    await runVerification({
-      cwd,
-      turnDir,
-      scope: EMPTY_SCOPE,
-      discovery: EMPTY_DISCOVERY,
-      planContent: "# Test Plan",
-      config,
-      projectSkills: "",
-    });
-
-    // Custom sequential step output file should exist
-    const seqOutputPath = join(turnDir, "verify", "skills", "my-seq-check.stdout.log");
-    expect(existsSync(seqOutputPath)).toBe(true);
-
-    // The output.json should also exist
-    const seqOutputJsonPath = join(turnDir, "verify", "skills", "my-seq-check.output.json");
-    expect(existsSync(seqOutputJsonPath)).toBe(true);
-  }, 120000);
-
-  test("skill template load failure produces error SkillResult (VI-20)", async () => {
-    // Use a skillOverride pointing to a non-existent promptFile for the reviewer skill.
-    // runSkill should catch the load error and return status="error" rather than throwing.
-    const turnDir = join(tmpDir, "turn-skill-load-fail");
-    const harness = writeFakeHarness(tmpDir, "fake-harness-skill-fail.sh");
-
-    const config: AdversaryConfig = {
-      ...DEFAULT_CONFIG,
-      verifyCommandTemplate: `${harness} @{promptFile}`,
-      verifyTimeoutMs: 30000,
-      skillOverrides: {
-        reviewer: {
-          promptFile: "/nonexistent/path/that/does/not/exist.md",
-        },
-      },
-    };
-
-    // runVerification should not throw — skill failure is gracefully handled
-    const report = await runVerification({
-      cwd,
-      turnDir,
-      scope: EMPTY_SCOPE,
-      discovery: EMPTY_DISCOVERY,
-      planContent: "# Test Plan",
-      config,
-      projectSkills: "",
-    });
-
-    // Should still complete; reviewer's error SkillResult contributes 0 findings via synthesis
-    expect(report.schemaVersion).toBe(1);
-    expect(["ok", "blocked", "error"]).toContain(report.status);
-    expect(Array.isArray(report.findings)).toBe(true);
-  }, 120000);
-
-  test("synthesis template load failure falls back to deterministic synthesis (VI-21)", async () => {
-    // Use a skillOverride for "synthesis" pointing to a non-existent file.
-    // runSynthesis should catch the load error and fall back to synthesizeFallback().
-    const turnDir = join(tmpDir, "turn-synthesis-fail");
-    const harness = writeFakeHarness(tmpDir, "fake-harness-syn-fail.sh", {
-      findings: [{ title: "Test Finding", severity: 5, description: "A finding for fallback", sources: ["reviewer"] }],
-      status: "ok",
-    });
-
-    const config: AdversaryConfig = {
-      ...DEFAULT_CONFIG,
-      verifyCommandTemplate: `${harness} @{promptFile}`,
-      verifyTimeoutMs: 30000,
-      skillOverrides: {
-        synthesis: {
-          promptFile: "/nonexistent/synthesis-template-does-not-exist.md",
-        },
-      },
-    };
-
-    // Should not throw — synthesis fallback is used when template load fails
-    const report = await runVerification({
-      cwd,
-      turnDir,
-      scope: EMPTY_SCOPE,
-      discovery: EMPTY_DISCOVERY,
-      planContent: "# Test Plan",
-      config,
-      projectSkills: "",
-    });
-
-    // Fallback should produce a valid report
-    expect(report.schemaVersion).toBe(1);
-    expect(["ok", "blocked", "error"]).toContain(report.status);
-    expect(Array.isArray(report.findings)).toBe(true);
-  }, 120000);
-
-  test("runVerification throws when turnDir cannot be created (e.g. path is an existing file)", async () => {
-    // Write a file at the turnDir path so mkdir fails with ENOTDIR
-    const conflictPath = join(tmpDir, "turn-conflict");
-    writeFileSync(conflictPath, "I am a file, not a directory");
-
-    const harness = writeFakeHarness(tmpDir, "fake-harness-throw.sh");
-    const config: AdversaryConfig = {
-      ...DEFAULT_CONFIG,
-      verifyCommandTemplate: `${harness} @{promptFile}`,
-      verifyTimeoutMs: 30000,
-    };
-
-    // runVerification should throw because it can't create subdirs under a file path
-    await expect(
-      runVerification({
-        cwd,
-        turnDir: conflictPath, // this is a file, not a directory
-        scope: EMPTY_SCOPE,
-        discovery: EMPTY_DISCOVERY,
-        planContent: "# Test Plan",
-        config,
-        projectSkills: "",
-      })
-    ).rejects.toThrow();
-  }, 30000);
-
-  // VI-5: synthesis returns valid JSON but with wrong schema — fallback must be used
-  test("synthesis valid JSON with wrong schemaVersion falls back to deterministic synthesis", async () => {
-    const turnDir = join(tmpDir, "turn-wrong-schema");
-    // Harness always returns valid JSON but with wrong schemaVersion for synthesis
-    const wrongSchemaHarness = join(tmpDir, "wrong-schema-harness.sh");
-    writeFileSync(
-      wrongSchemaHarness,
-      `#!/bin/sh
-PROMPT_FILE=""
-for arg in "$@"; do
-  case "$arg" in
-    @*) PROMPT_FILE="\${arg#@}" ;;
-  esac
-done
-
-if [ -z "$PROMPT_FILE" ]; then
-  echo '{"status":"ok","findings":[]}'
-  exit 0
-fi
-
-CONTENT=$(cat "$PROMPT_FILE" 2>/dev/null || echo "")
-
-if echo "$CONTENT" | grep -q "schemaVersion"; then
-  # Return valid JSON but with wrong schemaVersion — should trigger fallback
-  echo '{"schemaVersion":99,"status":"ok","findings":[]}'
-  exit 0
-fi
-
-if echo "$CONTENT" | grep -q 'testCommand\\|toolchain discovery'; then
-  echo '{"testCommand":null,"buildCommand":null,"lintCommands":[],"typeCheckCommands":[],"startCommand":null,"browserDeps":[]}'
-  exit 0
-fi
-
-echo '{"status":"completed","findings":[]}'
-exit 0
-`,
-      { mode: 0o755 }
-    );
-
-    const config: AdversaryConfig = {
-      ...DEFAULT_CONFIG,
-      verifyCommandTemplate: `${wrongSchemaHarness} @{promptFile}`,
-      verifyTimeoutMs: 30000,
-    };
-
-    // Should not throw — deterministic fallback is used when synthesis schema is wrong
-    const report = await runVerification({
-      cwd,
-      turnDir,
-      scope: EMPTY_SCOPE,
-      discovery: EMPTY_DISCOVERY,
-      planContent: "# Test Plan",
-      config,
-      projectSkills: "",
-    });
-
-    // Fallback produces a valid report
-    expect(report.schemaVersion).toBe(1);
-    expect(["ok", "blocked", "error"]).toContain(report.status);
-    expect(Array.isArray(report.findings)).toBe(true);
-  }, 120000);
-
-  // VI-5: synthesis returns valid JSON with invalid status — fallback must be used
-  test("synthesis valid JSON with invalid status falls back to deterministic synthesis", async () => {
-    const turnDir = join(tmpDir, "turn-invalid-status");
-    const invalidStatusHarness = join(tmpDir, "invalid-status-harness.sh");
-    writeFileSync(
-      invalidStatusHarness,
-      `#!/bin/sh
-PROMPT_FILE=""
-for arg in "$@"; do
-  case "$arg" in
-    @*) PROMPT_FILE="\${arg#@}" ;;
-  esac
-done
-
-if [ -z "$PROMPT_FILE" ]; then
-  echo '{"status":"ok","findings":[]}'
-  exit 0
-fi
-
-CONTENT=$(cat "$PROMPT_FILE" 2>/dev/null || echo "")
-
-if echo "$CONTENT" | grep -q "schemaVersion"; then
-  # Return valid JSON with correct schemaVersion but invalid status — should trigger fallback
-  echo '{"schemaVersion":1,"status":"unknown-invalid-status","findings":[]}'
-  exit 0
-fi
-
-if echo "$CONTENT" | grep -q 'testCommand\\|toolchain discovery'; then
-  echo '{"testCommand":null,"buildCommand":null,"lintCommands":[],"typeCheckCommands":[],"startCommand":null,"browserDeps":[]}'
-  exit 0
-fi
-
-echo '{"status":"completed","findings":[]}'
-exit 0
-`,
-      { mode: 0o755 }
-    );
-
-    const config: AdversaryConfig = {
-      ...DEFAULT_CONFIG,
-      verifyCommandTemplate: `${invalidStatusHarness} @{promptFile}`,
-      verifyTimeoutMs: 30000,
-    };
-
-    const report = await runVerification({
-      cwd,
-      turnDir,
-      scope: EMPTY_SCOPE,
-      discovery: EMPTY_DISCOVERY,
-      planContent: "# Test Plan",
-      config,
-      projectSkills: "",
-    });
-
-    // Fallback produces a valid report with schemaVersion 1
-    expect(report.schemaVersion).toBe(1);
-    expect(["ok", "blocked", "error"]).toContain(report.status);
-  }, 120000);
-
-  test("custom parallel steps are run alongside builtin skills", async () => {
-    const turnDir = join(tmpDir, "turn-custom");
+  test("parallel-review custom steps run and store per-step artifacts", async () => {
+    const turnDir = join(tmpDir, "turn-custom-parallel");
     const harness = writeFakeHarness(tmpDir, "fake-harness-custom.sh");
-
-    // Custom step that outputs a finding
-    const customHarness = join(tmpDir, "custom-step.sh");
-    writeFileSync(
-      customHarness,
-      `#!/bin/sh\necho '{"status":"ok","findings":[{"title":"Custom Finding","severity":3,"description":"Custom check","sources":["my-custom-check"]}]}'\nexit 0\n`,
-      { mode: 0o755 }
-    );
-
-    const config: AdversaryConfig = {
-      ...DEFAULT_CONFIG,
-      verifyCommandTemplate: `${harness} @{promptFile}`,
-      verifyTimeoutMs: 30000,
-      customVerificationSteps: [
-        {
-          name: "my-custom-check",
-          commandTemplate: `${customHarness}`,
-          phase: "parallel",
-          timeoutMs: 10000,
-        },
-      ],
-    };
+    const customStep = join(tmpDir, "custom-step.sh");
+    writeFileSync(customStep, "#!/bin/sh\necho 'plain text issue output'\n", { mode: 0o755 });
 
     await runVerification({
       cwd,
@@ -596,11 +154,99 @@ exit 0
       scope: EMPTY_SCOPE,
       discovery: EMPTY_DISCOVERY,
       planContent: "# Test Plan",
-      config,
-      projectSkills: "",
+      config: {
+        ...DEFAULT_CONFIG,
+        verifyCommandTemplate: `${harness} @{promptFile}`,
+        customVerificationSteps: [
+          { name: "codex-review", commandTemplate: customStep, phase: "parallel-review" },
+        ],
+      },
+      repoGuidance: "",
     });
 
-    // Custom step prompt file should be created in skills dir
-    expect(existsSync(join(turnDir, "verify", "skills", "my-custom-check.stdout.log"))).toBe(true);
+    expect(existsSync(join(turnDir, "verify", "steps", "codex-review", "stdout.log"))).toBe(true);
+    expect(existsSync(join(turnDir, "verify", "steps", "codex-review", "analysis.prompt.md"))).toBe(true);
+    expect(existsSync(join(turnDir, "verify", "steps", "codex-review", "output.json"))).toBe(true);
+  }, 120000);
+
+  test("configured deterministic steps override discovered fallback and run before exerciser", async () => {
+    const turnDir = join(tmpDir, "turn-deterministic");
+    const harness = writeFakeHarness(tmpDir, "fake-harness-det.sh");
+    const orderFile = join(tmpDir, "order.log");
+    const deterministicStep = join(tmpDir, "det-step.sh");
+    const discoveredTest = join(tmpDir, "discovered-test.sh");
+    writeFileSync(deterministicStep, `#!/bin/sh\necho custom-test >> "${orderFile}"\nexit 0\n`, { mode: 0o755 });
+    writeFileSync(discoveredTest, `#!/bin/sh\necho discovered-test >> "${orderFile}"\nexit 0\n`, { mode: 0o755 });
+
+    await runVerification({
+      cwd,
+      turnDir,
+      scope: EMPTY_SCOPE,
+      discovery: { ...EMPTY_DISCOVERY, testCommand: discoveredTest },
+      planContent: "# Test Plan",
+      config: {
+        ...DEFAULT_CONFIG,
+        verifyCommandTemplate: `${harness} @{promptFile}`,
+        customVerificationSteps: [
+          { name: "custom-test", phase: "deterministic", kind: "test", commandTemplate: deterministicStep },
+        ],
+      },
+      repoGuidance: "",
+    });
+
+    expect(existsSync(join(turnDir, "verify", "steps", "custom-test", "output.json"))).toBe(true);
+    expect(existsSync(join(turnDir, "verify", "steps", "discovered-test", "output.json"))).toBe(false);
+
+    const order = (await Bun.file(orderFile).text()).trim().split("\n");
+    expect(order).toEqual(["custom-test"]);
+  }, 120000);
+
+  test("malformed built-in output becomes a severity-8 finding instead of terminal verify error", async () => {
+    const turnDir = join(tmpDir, "turn-malformed");
+    const badHarness = join(tmpDir, "bad-harness.sh");
+    writeFileSync(badHarness, "#!/bin/sh\necho 'not json'\n", { mode: 0o755 });
+
+    const report = await runVerification({
+      cwd,
+      turnDir,
+      scope: EMPTY_SCOPE,
+      discovery: EMPTY_DISCOVERY,
+      planContent: "# Test Plan",
+      config: { ...DEFAULT_CONFIG, verifyCommandTemplate: `${badHarness} @{promptFile}` },
+      repoGuidance: "",
+    });
+
+    expect(report.status).toBe("ok");
+    expect(report.findings.some((finding) => finding.severity === 8)).toBe(true);
+  }, 120000);
+
+  test("synthesis status error is normalized to ok when findings are valid", async () => {
+    const turnDir = join(tmpDir, "turn-synthesis-status-error");
+    const harness = writeFakeHarness(tmpDir, "fake-harness-synthesis-error.sh", {
+      synthesisStatus: "error",
+      synthesisFindings: [
+        {
+          title: "Real product issue",
+          severity: 8,
+          description: "The branch still has a defect that should feed the next turn.",
+          sources: ["reviewer"],
+          location: { path: "src/test.ts", line: 1 },
+        },
+      ],
+    });
+
+    const report = await runVerification({
+      cwd,
+      turnDir,
+      scope: EMPTY_SCOPE,
+      discovery: EMPTY_DISCOVERY,
+      planContent: "# Test Plan",
+      config: { ...DEFAULT_CONFIG, verifyCommandTemplate: `${harness} @{promptFile}` },
+      repoGuidance: "",
+    });
+
+    expect(report.status).toBe("ok");
+    expect(report.findings).toHaveLength(1);
+    expect(report.findings[0]?.title).toBe("Real product issue");
   }, 120000);
 });

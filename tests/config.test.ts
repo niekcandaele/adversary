@@ -45,6 +45,7 @@ describe("loadConfig", () => {
     expect(config.summarizerCommandTemplate).toBe(DEFAULT_CONFIG.summarizerCommandTemplate);
     expect(config.implementTimeoutMs).toBe(DEFAULT_CONFIG.implementTimeoutMs);
     expect(config.verifyTimeoutMs).toBe(DEFAULT_CONFIG.verifyTimeoutMs);
+    expect(config.testTimeoutMs).toBe(DEFAULT_CONFIG.testTimeoutMs);
     expect(config.prTimeoutMs).toBe(DEFAULT_CONFIG.prTimeoutMs);
     expect(config.summarizerTimeoutMs).toBe(DEFAULT_CONFIG.summarizerTimeoutMs);
   });
@@ -91,6 +92,21 @@ describe("loadConfig", () => {
     await writeFile(badConfigPath, "{ not valid json }");
 
     expect(loadConfig(tmpDir, badConfigPath)).rejects.toThrow();
+  });
+
+  test("loads testTimeoutMs from file", async () => {
+    const configPath = join(tmpDir, "adversary-test-timeout.json");
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        testTimeoutMs: 7200000,
+      })
+    );
+
+    const config = await loadConfig(tmpDir, configPath);
+    expect(config.testTimeoutMs).toBe(7200000);
+    // Other fields stay at default
+    expect(config.verifyTimeoutMs).toBe(DEFAULT_CONFIG.verifyTimeoutMs);
   });
 
   test("loads summarizerCommandTemplate from file", async () => {
@@ -455,15 +471,16 @@ describe("new config fields", () => {
     const configPath = join(tmpDir, "adv-steps.json");
     await writeFile(configPath, JSON.stringify({
       customVerificationSteps: [
-        { name: "my-check", commandTemplate: "my-check {promptFile}", phase: "parallel" },
-        { name: "seq-check", commandTemplate: "seq-check", phase: "sequential", timeoutMs: 60000 },
+        { name: "my-check", commandTemplate: "my-check {contextFile}", phase: "parallel-review" },
+        { name: "det-check", commandTemplate: "bun test", phase: "deterministic", kind: "test", timeoutMs: 60000 },
       ],
     }));
     const config = await loadConfig(tmpDir, configPath);
     expect(config.customVerificationSteps).toHaveLength(2);
     expect(config.customVerificationSteps[0]?.name).toBe("my-check");
-    expect(config.customVerificationSteps[0]?.phase).toBe("parallel");
-    expect(config.customVerificationSteps[1]?.name).toBe("seq-check");
+    expect(config.customVerificationSteps[0]?.phase).toBe("parallel-review");
+    expect(config.customVerificationSteps[1]?.name).toBe("det-check");
+    expect(config.customVerificationSteps[1]?.kind).toBe("test");
     expect(config.customVerificationSteps[1]?.timeoutMs).toBe(60000);
   });
 
@@ -475,6 +492,37 @@ describe("new config fields", () => {
       ],
     }));
     await expect(loadConfig(tmpDir, configPath)).rejects.toThrow();
+  });
+
+  test("throws when deterministic custom step omits kind", async () => {
+    const configPath = join(tmpDir, "adv-bad-det-step.json");
+    await writeFile(configPath, JSON.stringify({
+      customVerificationSteps: [
+        { name: "bad", commandTemplate: "cmd", phase: "deterministic" },
+      ],
+    }));
+    await expect(loadConfig(tmpDir, configPath)).rejects.toThrow("kind");
+  });
+
+  test("throws when parallel-review custom step provides kind", async () => {
+    const configPath = join(tmpDir, "adv-bad-par-step.json");
+    await writeFile(configPath, JSON.stringify({
+      customVerificationSteps: [
+        { name: "bad", commandTemplate: "cmd", phase: "parallel-review", kind: "lint" },
+      ],
+    }));
+    await expect(loadConfig(tmpDir, configPath)).rejects.toThrow("kind");
+  });
+
+  test("throws when custom step names are duplicated", async () => {
+    const configPath = join(tmpDir, "adv-dup-step.json");
+    await writeFile(configPath, JSON.stringify({
+      customVerificationSteps: [
+        { name: "dup", commandTemplate: "cmd-a", phase: "parallel-review" },
+        { name: "dup", commandTemplate: "cmd-b", phase: "deterministic", kind: "test" },
+      ],
+    }));
+    await expect(loadConfig(tmpDir, configPath)).rejects.toThrow("unique");
   });
 
   test("loads skillOverrides from config", async () => {

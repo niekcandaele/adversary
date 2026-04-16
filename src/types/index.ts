@@ -3,19 +3,21 @@
 export type BuiltinSkillName =
   | "reviewer"
   | "qa"
-  | "tester"
-  | "static-analysis"
   | "ux-reviewer"
   | "exerciser"
   | "plan-completeness";
 
 export type BrowserAutomationMode = "warn" | "require" | "skip";
 
+export type VerificationStepPhase = "parallel-review" | "deterministic";
+export type DeterministicStepKind = "test" | "build" | "lint" | "typecheck";
+
 export interface CustomVerificationStep {
   name: string;
   commandTemplate: string;
-  phase: "parallel" | "sequential";
+  phase: VerificationStepPhase;
   timeoutMs?: number;
+  kind?: DeterministicStepKind;
 }
 
 export interface SkillOverride {
@@ -29,7 +31,8 @@ export interface SkillResult {
   exitCode: number;
   durationMs: number;
   findings: VerifyFinding[];
-  status: "completed" | "blocked" | "error" | "timeout";
+  status: "completed" | "error" | "timeout";
+  artifactDir?: string;
 }
 
 export interface VerifyScope {
@@ -56,12 +59,11 @@ export interface ToolchainDiscovery {
 
 /**
  * Status of a verify run.
- * - "ok": verification ran and found no blocking issues
- * - "blocked": verification explicitly blocked the turn (e.g. a skill returned blocked)
- * - "error": verification ran but encountered errors
+ * - "ok": verification completed and produced a usable findings report
+ * - "error": the verification framework itself failed to produce a reliable report
  * - "skipped": verification did not run (implement/summarizer/commit failure before verify step)
  */
-export type VerifyStatus = "ok" | "blocked" | "error" | "skipped";
+export type VerifyStatus = "ok" | "error" | "skipped";
 
 export interface VerifyLocation {
   path: string;
@@ -92,6 +94,7 @@ export interface AdversaryConfig {
   summarizerCommandTemplate: string;
   implementTimeoutMs: number;
   verifyTimeoutMs: number;
+  testTimeoutMs: number;
   prTimeoutMs: number;
   summarizerTimeoutMs: number;
   browserAutomation: BrowserAutomationMode;
@@ -103,8 +106,9 @@ export const DEFAULT_CONFIG: AdversaryConfig = {
   implementCommandTemplate: "pi -p @{promptFile}",
   verifyCommandTemplate: "pi -p @{promptFile}",
   summarizerCommandTemplate: "pi -p @{promptFile}",
-  implementTimeoutMs: 2700000,
+  implementTimeoutMs: 10800000,
   verifyTimeoutMs: 900000,
+  testTimeoutMs: 1800000,
   prTimeoutMs: 300000,
   summarizerTimeoutMs: 300000,
   browserAutomation: "warn",
@@ -156,7 +160,6 @@ export type RunOutcome =
   | "implement-failure"
   | "summarizer-failure"
   | "verify-failure"
-  | "verify-blocked"
   | "verify-error"
   | "preflight-failure";
 
@@ -182,7 +185,7 @@ export interface TurnResult {
    * When the loop ends, RunState.outcome is set from the last TurnResult.outcome that
    * maps to a terminal state (e.g. "clean", "capped", etc.).
    */
-  outcome: "continue" | "clean" | "capped" | "commit-failure" | "implement-failure" | "summarizer-failure" | "verify-failure" | "verify-blocked" | "verify-error";
+  outcome: "continue" | "clean" | "capped" | "commit-failure" | "implement-failure" | "summarizer-failure" | "verify-failure" | "verify-error";
 }
 
 export interface RunState {

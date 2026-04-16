@@ -22,31 +22,13 @@ describe("synthesizeFallback", () => {
     expect(report.status).toBe("ok");
   });
 
-  test("returns blocked status when any skill is blocked", () => {
+  test("keeps ok status when a step error is represented as findings", () => {
     const results: SkillResult[] = [
       { skill: "reviewer", exitCode: 0, durationMs: 100, findings: [], status: "completed" },
-      { skill: "tester", exitCode: 1, durationMs: 0, findings: [], status: "blocked" },
+      { skill: "qa", exitCode: 1, durationMs: 0, findings: [{ title: "qa step failed", severity: 8, description: "meta", sources: ["qa"] }], status: "error" },
     ];
     const report = synthesizeFallback(results);
-    expect(report.status).toBe("blocked");
-  });
-
-  test("returns error status when any skill has error (no blocked)", () => {
-    const results: SkillResult[] = [
-      { skill: "reviewer", exitCode: 0, durationMs: 100, findings: [], status: "completed" },
-      { skill: "tester", exitCode: 1, durationMs: 0, findings: [], status: "error" },
-    ];
-    const report = synthesizeFallback(results);
-    expect(report.status).toBe("error");
-  });
-
-  test("blocked takes precedence over error", () => {
-    const results: SkillResult[] = [
-      { skill: "reviewer", exitCode: 1, durationMs: 0, findings: [], status: "error" },
-      { skill: "tester", exitCode: 1, durationMs: 0, findings: [], status: "blocked" },
-    ];
-    const report = synthesizeFallback(results);
-    expect(report.status).toBe("blocked");
+    expect(report.status).toBe("ok");
   });
 
   test("concatenates all findings from all skills", () => {
@@ -171,12 +153,12 @@ describe("synthesizeFallback", () => {
     expect(report.findings[2]?.severity).toBe(2);
   });
 
-  test("handles timeout status as error-like", () => {
+  test("handles timeout status as a finding-only condition", () => {
     const results: SkillResult[] = [
-      { skill: "reviewer", exitCode: 124, durationMs: 90000, findings: [], status: "timeout" },
+      { skill: "reviewer", exitCode: 124, durationMs: 90000, findings: [{ title: "reviewer step failed", severity: 8, description: "timeout", sources: ["reviewer"] }], status: "timeout" },
     ];
     const report = synthesizeFallback(results);
-    expect(report.status).toBe("error");
+    expect(report.status).toBe("ok");
   });
 
   // VI-15: location-less finding dedup

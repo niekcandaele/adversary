@@ -85,12 +85,12 @@ describe("parseSkillOutput behavior (via runVerification)", () => {
       discovery: EMPTY_DISCOVERY,
       planContent: "# Test Plan",
       config,
-      projectSkills: "",
+      repoGuidance: "",
     });
 
     // Should produce a valid report even when all skills time out
     expect(report.schemaVersion).toBe(1);
-    expect(["ok", "blocked", "error"]).toContain(report.status);
+    expect(["ok", "error"]).toContain(report.status);
     expect(Array.isArray(report.findings)).toBe(true);
   }, 60000);
 
@@ -135,7 +135,7 @@ exit 0
       discovery: EMPTY_DISCOVERY,
       planContent: "# Test Plan",
       config,
-      projectSkills: "",
+      repoGuidance: "",
     });
 
     expect(report.schemaVersion).toBe(1);
@@ -164,13 +164,12 @@ exit 0
       discovery: EMPTY_DISCOVERY,
       planContent: "# Test Plan",
       config,
-      projectSkills: "",
+      repoGuidance: "",
     });
 
     expect(report.schemaVersion).toBe(1);
-    // All skills errored, so synthesis fallback returns "error"
-    expect(report.status).toBe("error");
-    expect(report.findings).toHaveLength(0);
+    expect(report.status).toBe("ok");
+    expect(report.findings.some((finding) => finding.severity === 8)).toBe(true);
   }, 120000);
 
   test("findings with malformed entries are skipped, valid ones are kept", async () => {
@@ -210,7 +209,7 @@ exit 0
       discovery: EMPTY_DISCOVERY,
       planContent: "# Test Plan",
       config,
-      projectSkills: "",
+      repoGuidance: "",
     });
 
     // Only the valid finding should be in the report

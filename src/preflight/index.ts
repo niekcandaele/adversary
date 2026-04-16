@@ -98,17 +98,7 @@ export async function checkBrowserAutomation(
 
   if (mode === "warn") {
     process.stderr.write(`  Warning: ${message}`);
-
-    if (process.stdin.isTTY) {
-      // Prompt user to continue — write to stderr so stdout remains clean
-      process.stderr.write("Continue anyway? [y/N] ");
-      const answer = await readLineFromStdin();
-      if (!answer.toLowerCase().startsWith("y")) {
-        throw new PreflightError("Aborted: browser automation not available.");
-      }
-    } else {
-      process.stderr.write("  [preflight] Non-interactive mode, continuing without browser automation.\n");
-    }
+    process.stderr.write("  [preflight] Continuing without browser automation.\n");
     return;
   }
 
@@ -118,42 +108,6 @@ export async function checkBrowserAutomation(
         `Install playwright, puppeteer, or cypress, or set browserAutomation to "warn" or "skip".`
     );
   }
-}
-
-async function readLineFromStdin(): Promise<string> {
-  return new Promise((resolve) => {
-    let buf = "";
-    let resolved = false;
-
-    function onData(chunk: string) {
-      buf += chunk;
-      const newline = buf.indexOf("\n");
-      const line = newline !== -1 ? buf.slice(0, newline) : buf;
-      // Pause stdin to stop flowing mode after reading, preventing the process
-      // from staying alive due to an open stdin stream.
-      finish(line);
-    }
-
-    function onEnd() {
-      finish("");
-    }
-
-    function finish(line: string) {
-      if (resolved) return;
-      resolved = true;
-      // Remove both listeners to avoid the alternate one leaking as a dangling listener
-      process.stdin.removeListener("data", onData);
-      process.stdin.removeListener("end", onEnd);
-      process.stdin.pause();
-      resolve(line);
-    }
-
-    process.stdin.setEncoding("utf8");
-    // If stdin closes (EOF) before any data arrives, resolve with empty string
-    // rather than hanging indefinitely.
-    process.stdin.once("data", onData);
-    process.stdin.once("end", onEnd);
-  });
 }
 
 export interface PreflightResult {

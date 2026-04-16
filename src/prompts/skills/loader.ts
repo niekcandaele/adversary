@@ -2,25 +2,25 @@ import type { SkillOverride } from "../../types/index.js";
 
 // Embed skill templates at compile time so they're available in compiled binaries.
 // Bun's `with { type: "text" }` inlines these as string constants in the bundle.
+import commandAnalyzerMd from "./command-analyzer.md" with { type: "text" };
 import discoveryMd from "./discovery.md" with { type: "text" };
 import exerciserMd from "./exerciser.md" with { type: "text" };
 import planCompletenessMd from "./plan-completeness.md" with { type: "text" };
 import qaMd from "./qa.md" with { type: "text" };
 import reviewerMd from "./reviewer.md" with { type: "text" };
-import staticAnalysisMd from "./static-analysis.md" with { type: "text" };
 import synthesisMd from "./synthesis.md" with { type: "text" };
-import testerMd from "./tester.md" with { type: "text" };
+import toolOutputAnalyzerMd from "./tool-output-analyzer.md" with { type: "text" };
 import uxReviewerMd from "./ux-reviewer.md" with { type: "text" };
 
 const BUILTIN_SKILLS: Record<string, string> = {
+  "command-analyzer": commandAnalyzerMd,
   discovery: discoveryMd,
   exerciser: exerciserMd,
   "plan-completeness": planCompletenessMd,
   qa: qaMd,
   reviewer: reviewerMd,
-  "static-analysis": staticAnalysisMd,
   synthesis: synthesisMd,
-  tester: testerMd,
+  "tool-output-analyzer": toolOutputAnalyzerMd,
   "ux-reviewer": uxReviewerMd,
 };
 

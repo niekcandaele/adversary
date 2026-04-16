@@ -19,6 +19,7 @@ function parseConfigLayer(raw: Record<string, unknown>): Partial<AdversaryConfig
   if (typeof raw.implementTimeoutMs === "number")
     layer.implementTimeoutMs = raw.implementTimeoutMs;
   if (typeof raw.verifyTimeoutMs === "number") layer.verifyTimeoutMs = raw.verifyTimeoutMs;
+  if (typeof raw.testTimeoutMs === "number") layer.testTimeoutMs = raw.testTimeoutMs;
   if (typeof raw.prTimeoutMs === "number") layer.prTimeoutMs = raw.prTimeoutMs;
   if (typeof raw.summarizerTimeoutMs === "number")
     layer.summarizerTimeoutMs = raw.summarizerTimeoutMs;
@@ -39,6 +40,7 @@ function parseConfigLayer(raw: Record<string, unknown>): Partial<AdversaryConfig
       throw new Error("customVerificationSteps must be an array");
     }
     const steps = raw.customVerificationSteps as unknown[];
+    const seenNames = new Set<string>();
     layer.customVerificationSteps = steps.map((step, i) => {
       const s = step as Record<string, unknown>;
       if (typeof s.name !== "string") {
@@ -49,19 +51,35 @@ function parseConfigLayer(raw: Record<string, unknown>): Partial<AdversaryConfig
           `customVerificationSteps[${i}].name contains invalid characters (only alphanumeric, dots, hyphens, underscores allowed)`
         );
       }
+      if (seenNames.has(s.name)) {
+        throw new Error(`customVerificationSteps[${i}].name must be unique: "${s.name}"`);
+      }
+      seenNames.add(s.name);
       if (typeof s.commandTemplate !== "string") {
         throw new Error(`customVerificationSteps[${i}].commandTemplate must be a string`);
       }
-      if (s.phase !== "parallel" && s.phase !== "sequential") {
+      if (s.phase !== "parallel-review" && s.phase !== "deterministic") {
         throw new Error(
-          `customVerificationSteps[${i}].phase must be "parallel" or "sequential"`
+          `customVerificationSteps[${i}].phase must be "parallel-review" or "deterministic"`
+        );
+      }
+      if (s.phase === "deterministic") {
+        if (!['test', 'build', 'lint', 'typecheck'].includes(s.kind as string)) {
+          throw new Error(
+            `customVerificationSteps[${i}].kind must be "test", "build", "lint", or "typecheck" when phase is "deterministic"`
+          );
+        }
+      } else if (s.kind !== undefined) {
+        throw new Error(
+          `customVerificationSteps[${i}].kind must be omitted when phase is "parallel-review"`
         );
       }
       return {
         name: s.name,
         commandTemplate: s.commandTemplate,
-        phase: s.phase as "parallel" | "sequential",
+        phase: s.phase as import("../types/index.js").VerificationStepPhase,
         timeoutMs: typeof s.timeoutMs === "number" ? s.timeoutMs : undefined,
+        kind: s.kind as import("../types/index.js").DeterministicStepKind | undefined,
       };
     });
   }

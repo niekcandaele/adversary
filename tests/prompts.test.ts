@@ -29,6 +29,7 @@ describe("generateFirstTurnPrompt", () => {
       turn: 1,
       maxTurns: 5,
       branch: "adversary/20260410-feature",
+      repoGuidance: "## Project Skills\n\nFollow repo conventions.",
       outputPath,
     });
 
@@ -37,6 +38,8 @@ describe("generateFirstTurnPrompt", () => {
     expect(content).toContain("Severity Threshold");
     expect(content).toContain("7");
     expect(content).toContain("adversary/20260410-feature");
+    expect(content).toContain("Repo Guidance");
+    expect(content).toContain("Follow repo conventions.");
     // Must tell agent not to manage git
     expect(content).toContain("Do NOT manage git");
     // Must tell agent not to run verify
@@ -49,7 +52,7 @@ describe("generateFirstTurnPrompt", () => {
 });
 
 describe("generateLaterTurnPrompt", () => {
-  test("includes findings and history", async () => {
+  test("includes only current findings plus repo guidance", async () => {
     const outputPath = join(tmpDir, "later-turn.md");
     const findings: VerifyFinding[] = [
       {
@@ -68,7 +71,7 @@ describe("generateLaterTurnPrompt", () => {
       maxTurns: 5,
       branch: "adversary/20260410-feature",
       thresholdFindings: findings,
-      historyContent: "## Turn 1\n\n- Outcome: continue",
+      repoGuidance: "## Repo Docs\n\nStay aligned with existing patterns.",
       outputPath,
     });
 
@@ -76,10 +79,12 @@ describe("generateLaterTurnPrompt", () => {
     expect(content).toContain("Missing tests");
     expect(content).toContain("severity 8");
     expect(content).toContain("src/main.ts");
-    expect(content).toContain("Turn 1");
+    expect(content).toContain("Repo Guidance");
+    expect(content).toContain("Stay aligned with existing patterns.");
     expect(content).toContain("# Original Plan");
     expect(content).toContain("Do NOT manage git");
     expect(content).toContain("Do NOT run the verify");
+    expect(content).not.toContain("Run History");
   });
 });
 

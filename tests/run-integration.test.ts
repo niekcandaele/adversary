@@ -5,7 +5,7 @@
  * in a real git repo, similar to the runLoop integration tests.
  *
  * Focused on:
- * (a) failure outcome (implement-failure, verify-failure, verify-blocked, verify-error)
+ * (a) failure outcome (implement-failure, verify-failure, verify-error)
  *     must skip push/PR — no gh pr create call is made
  * (b) PrError from createPr must propagate (throw) out of runCommand
  */
@@ -125,7 +125,7 @@ exit 0
  */
 function makeFakeBin(tmpDir: string, opts: {
   implementExitCode?: number;
-  verifyStatus?: "ok" | "blocked" | "error";
+  verifyStatus?: string;
   prCreateExitCode?: number;
   prCreateOutput?: string;
 }): { binDir: string; verifyHarnessPath: string; prCreateArgsLog: string; summarizerScriptPath: string } {
@@ -161,9 +161,7 @@ exit 0
   );
 
   // Fake verify harness for multi-skill orchestrator
-  const findings = verifyStatus === "blocked"
-    ? [{ title: "Blocked", severity: 9, description: "Blocked", sources: ["qa"] }]
-    : verifyStatus === "error"
+  const findings = verifyStatus === "error"
     ? [{ title: "Error", severity: 8, description: "Error occurred", sources: ["tester"] }]
     : [];
 
@@ -301,7 +299,10 @@ describe("runCommand integration", () => {
     expect(await argsFile.exists()).toBe(false);
   }, 60000);
 
-  test("(a) verify-blocked outcome skips push and PR creation", async () => {
+  test("(a) blocked synthesis status falls back to ok — loop proceeds and PR is created", async () => {
+    // "blocked" is no longer a valid synthesis status. When the harness returns blocked,
+    // the orchestrator falls back to deterministic synthesis → "ok" with no findings.
+    // The loop completes "clean" and pushes/creates a PR.
     const repoDir = await makeGitRepo();
     const tmpBinDir = mkdtempSync(join(tmpdir(), "adversary-run-fakebin-blocked-"));
     const { binDir, verifyHarnessPath, prCreateArgsLog, summarizerScriptPath } = makeFakeBin(tmpBinDir, {
@@ -311,20 +312,22 @@ describe("runCommand integration", () => {
     });
 
     const implScript = writeScript(tmpBinDir, "fake-impl-ok.sh", `#!/bin/sh\nexit 0\n`);
-    const planPath = writePlan(tmpBinDir, "Test Blocked Skips PR");
+    const planPath = writePlan(tmpBinDir, "Test Blocked Fallback");
     const configPath = writeFakeConfig(tmpBinDir, {
       implementCommandTemplate: `${implScript} @{promptFile}`,
       verifyCommandTemplate: `${verifyHarnessPath} @{promptFile}`,
       summarizerCommandTemplate: `${summarizerScriptPath} @{promptFile}`,
     });
 
+    // Should not throw — loop completes normally since blocked is now treated as ok fallback
     await runWithFakePath(repoDir, binDir, planPath, configPath);
 
+    // PR creation IS expected since run ended clean (not a failure outcome)
     const argsFile = Bun.file(prCreateArgsLog);
-    expect(await argsFile.exists()).toBe(false);
+    expect(await argsFile.exists()).toBe(true);
   }, 120000);
 
-  test("(a) verify-error outcome skips push and PR creation", async () => {
+  test("(a) synthesized status=error with valid findings follows normal capped flow and still creates a PR", async () => {
     const repoDir = await makeGitRepo();
     const tmpBinDir = mkdtempSync(join(tmpdir(), "adversary-run-fakebin-verifyerror-"));
     const { binDir, verifyHarnessPath, prCreateArgsLog, summarizerScriptPath } = makeFakeBin(tmpBinDir, {
@@ -344,7 +347,7 @@ describe("runCommand integration", () => {
     await runWithFakePath(repoDir, binDir, planPath, configPath);
 
     const argsFile = Bun.file(prCreateArgsLog);
-    expect(await argsFile.exists()).toBe(false);
+    expect(await argsFile.exists()).toBe(true);
   }, 120000);
 
   test("(b) PrError from createPr propagates out of runCommand", async () => {

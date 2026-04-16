@@ -123,12 +123,19 @@ describe("checkBrowserAutomation", () => {
     await expect(checkBrowserAutomation("require", DISCOVERY_WITH_BROWSER)).resolves.toBeUndefined();
   });
 
-  test("warn mode: non-TTY stdin continues without prompting", async () => {
-    // In test environment, stdin.isTTY is false, so warn mode should log and continue
-    // rather than prompting. We verify it doesn't throw.
+  test("warn mode: continues without prompting when browser deps are missing", async () => {
     const originalIsTTY = process.stdin.isTTY;
-    // Force non-TTY mode
     Object.defineProperty(process.stdin, "isTTY", { value: false, configurable: true });
+    try {
+      await expect(checkBrowserAutomation("warn", EMPTY_DISCOVERY)).resolves.toBeUndefined();
+    } finally {
+      Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
+    }
+  });
+
+  test("warn mode: continues without prompting even in TTY mode", async () => {
+    const originalIsTTY = process.stdin.isTTY;
+    Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
     try {
       await expect(checkBrowserAutomation("warn", EMPTY_DISCOVERY)).resolves.toBeUndefined();
     } finally {

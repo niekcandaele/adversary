@@ -51,12 +51,18 @@ export async function runStep(options: {
   label: string;
   /** Optional env override for the spawned process. Defaults to process.env. */
   env?: NodeJS.ProcessEnv;
+  /**
+   * If provided, used directly as the argv array instead of parsing `command`.
+   * Use this when the command contains shell metacharacters (&&, |, ;, etc.)
+   * and you want to spawn via ["sh", "-c", cmd] without going through parseCommand.
+   */
+  rawArgv?: string[];
 }): Promise<StepResult> {
   const { command, cwd, stdoutPath, stderrPath, timeoutMs, label } = options;
 
   await ensureDir(join(stdoutPath, ".."));
 
-  const argv = parseCommand(command);
+  const argv = options.rawArgv ?? parseCommand(command);
   const start = Date.now();
 
   const isTTY = process.stdout.isTTY ?? false;

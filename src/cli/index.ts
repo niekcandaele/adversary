@@ -54,8 +54,9 @@ Config file fields:
     "implementCommandTemplate": "pi -p @{promptFile}",
     "verifyCommandTemplate": "pi -p @{promptFile}",
     "summarizerCommandTemplate": "pi -p @{promptFile}",
-    "implementTimeoutMs": 2700000,
+    "implementTimeoutMs": 10800000,
     "verifyTimeoutMs": 900000,
+    "testTimeoutMs": 1800000,
     "prTimeoutMs": 300000,
     "summarizerTimeoutMs": 300000,
     "browserAutomation": "warn",
@@ -65,12 +66,15 @@ Config file fields:
 
   browserAutomation: "warn" | "require" | "skip"
     Controls behavior when no browser automation deps (Playwright/Puppeteer/Cypress) are found.
-    "warn" (default): print warning, prompt to continue
+    "warn" (default): print warning and continue without browser automation
     "require": fail preflight if browser automation not available
     "skip": silently skip browser automation checks
 
   customVerificationSteps: array of custom verification steps
-    Each step: { "name": "...", "commandTemplate": "...", "phase": "parallel"|"sequential", "timeoutMs": N }
+    parallel-review step:
+      { "name": "codex-review", "commandTemplate": "codex exec --full-auto < {contextFile}", "phase": "parallel-review", "timeoutMs": 300000 }
+    deterministic step:
+      { "name": "repo-tests", "commandTemplate": "bun test", "phase": "deterministic", "kind": "test", "timeoutMs": 600000 }
 
   skillOverrides: per-skill prompt overrides
     { "reviewer": { "extraContext": "extra context..." } }
@@ -78,6 +82,7 @@ Config file fields:
 
 Run artifacts:
   Stored in ~/.local/state/adversary/<repo>-<hash>/runs/ (or $XDG_STATE_HOME/adversary/...)
+  Verification artifacts live under turn-N/verify/steps/<step-name>/ and turn-N/verify/synthesis/
   <repo>  = basename of the repo directory
   <hash>  = first 8 characters of the SHA-256 hash of the absolute repo path
 
@@ -95,8 +100,9 @@ Template variables:
   {baseBranch}       Base branch name
 
 Timeouts (set via config file — defaults):
-  implementTimeoutMs:  2700000 (45 minutes)
+  implementTimeoutMs:  10800000 (3 hours)
   verifyTimeoutMs:     900000  (15 minutes, per-skill)
+  testTimeoutMs:       1800000 (30 minutes, for deterministic test command)
   prTimeoutMs:         300000  (5 minutes)
   summarizerTimeoutMs: 300000  (5 minutes)
 

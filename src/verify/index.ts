@@ -7,6 +7,7 @@ import type {
   VerifyScope,
   ToolchainDiscovery,
   BuiltinSkillName,
+  CustomVerificationStep,
 } from "../types/index.js";
 import { runStep } from "../runner/index.js";
 import { ensureDir, writeText, writeJsonFile } from "../utils/fs.js";
@@ -17,462 +18,483 @@ import {
   buildScopeMetadata,
   buildDiscoveryContext,
   buildPhase1FindingsSummary,
-  buildSkillFindingsJson,
 } from "./prompt-builder.js";
 import { synthesizeFallback } from "./synthesis-fallback.js";
 import { extractJson } from "../utils/json.js";
+import { runDeterministicCommands } from "./deterministic.js";
+import { validateRawFindings } from "./findings.js";
+import {
+  ensureStepDir,
+  writeBranchContextFile,
+  writeStepContextFile,
+  writeTruncatedHelperArtifacts,
+} from "./steps.js";
 
 const BUILTIN_PARALLEL_SKILLS: BuiltinSkillName[] = [
   "reviewer",
   "qa",
-  "tester",
-  "static-analysis",
   "ux-reviewer",
   "plan-completeness",
 ];
 
-/**
- * Run the full multi-phase verification pipeline.
- *
- * Note: `config.verifyCommandTemplate` is used for both the discovery step
- * (src/discovery/index.ts) and each verification skill invocation here.
- * This is intentional — discovery and verification both invoke an LLM harness
- * with a generated prompt file. If requirements diverge in the future, these
- * could be split into separate config fields (e.g. `discoveryCommandTemplate`).
- */
 export async function runVerification(options: {
   cwd: string;
   turnDir: string;
   scope: VerifyScope;
   discovery: ToolchainDiscovery;
   planContent: string;
+  planFile?: string;
   config: AdversaryConfig;
-  projectSkills: string;
+  repoGuidance: string;
   env?: NodeJS.ProcessEnv;
 }): Promise<VerifyReport> {
-  const { cwd, turnDir, scope, discovery, planContent, config, projectSkills, env } = options;
+  const { cwd, turnDir, scope, discovery, planContent, config, repoGuidance, env } = options;
 
-  // Setup directory structure
   const verifyDir = join(turnDir, "verify");
-  const skillsDir = join(verifyDir, "skills");
-  await ensureDir(skillsDir);
+  await ensureDir(join(verifyDir, "steps"));
+  await ensureDir(join(verifyDir, "synthesis"));
 
-  // Write scope and discovery for reference
+  const planFile = options.planFile ?? join(verifyDir, "plan.txt");
+  if (!options.planFile) {
+    await writeText(planFile, planContent);
+  }
+
   await writeJsonFile(join(verifyDir, "scope.json"), scope);
   await writeJsonFile(join(verifyDir, "discovery.json"), discovery);
 
-  // Build common template variables
-  const scopeContext = buildScopeContext(scope);
-  const scopeMetadata = buildScopeMetadata(scope);
-  const discoveryJson = buildDiscoveryContext(discovery);
-
-  const commonVars = {
-    scopeContext,
-    scopeMetadata,
-    diffStat: scope.diffStat,
-    discoveryJson,
-    planContent,
-    projectSkills,
-  };
-
-  // ── Phase 1: Parallel skills ─────────────────────────────────────────────
-
-  const phase1Skills = [...BUILTIN_PARALLEL_SKILLS];
-  const customParallel = config.customVerificationSteps.filter((s) => s.phase === "parallel");
-
-  const allParallelNames = [
-    ...phase1Skills.map((s) => s as string),
-    ...customParallel.map((s) => s.name),
-  ];
-  process.stdout.write(
-    `\n  [verify] Running ${allParallelNames.length} skills in parallel: ${allParallelNames.join(", ")}\n`
-  );
-
-  const phase1Promises = [
-    ...phase1Skills.map((skill) =>
-      runSkill({
-        skill,
-        cwd,
-        skillsDir,
-        scope,
-        discovery,
-        commonVars,
-        config,
-        env,
-        timeoutMs: config.verifyTimeoutMs,
-      })
-    ),
-    ...customParallel.map((step) =>
-      runCustomStep({
-        step,
-        cwd,
-        skillsDir,
-        scope,
-        commonVars,
-        config,
-        env,
-      })
-    ),
-  ];
-
-  const phase1Settled = await Promise.allSettled(phase1Promises);
-  const phase1Results: SkillResult[] = phase1Settled.map((r, i) => {
-    const skillName =
-      i < phase1Skills.length
-        ? (phase1Skills[i] as string)
-        : (customParallel[i - phase1Skills.length]?.name ?? "custom");
-
-    if (r.status === "fulfilled") {
-      return r.value;
-    } else {
-      process.stderr.write(`  Warning: skill "${skillName}" threw: ${r.reason}\n`);
-      return {
-        skill: skillName,
-        exitCode: 1,
-        durationMs: 0,
-        findings: [],
-        status: "error" as const,
-      };
-    }
-  });
-
-  // ── Phase 2: Exerciser (sequential) ─────────────────────────────────────
-
-  process.stdout.write(`  [verify] Running exerciser...\n`);
-  const phase1Summary = buildPhase1FindingsSummary(phase1Results);
-
-  const exerciserResult = await runSkill({
-    skill: "exerciser",
-    cwd,
-    skillsDir,
+  const branchContextFile = await writeBranchContextFile({
+    verifyDir,
+    planFile,
     scope,
     discovery,
-    commonVars: { ...commonVars, phase1Findings: phase1Summary },
-    config,
-    env,
-    timeoutMs: config.verifyTimeoutMs,
+    repoGuidance,
   });
 
-  // Run custom sequential steps — they receive phase1Findings in their vars
-  const customSequential = config.customVerificationSteps.filter((s) => s.phase === "sequential");
-  const customSequentialResults: SkillResult[] = [];
-  for (const step of customSequential) {
-    process.stdout.write(`  [verify] Running custom step: ${step.name}...\n`);
-    const result = await runCustomStep({
-      step,
-      cwd,
-      skillsDir,
-      scope,
-      commonVars: { ...commonVars, phase1Findings: phase1Summary },
-      config,
-      env,
-    });
-    customSequentialResults.push(result);
-  }
+  const commonVars = {
+    scopeContext: buildScopeContext(scope),
+    scopeMetadata: buildScopeMetadata(scope),
+    diffStat: scope.diffStat,
+    discoveryJson: buildDiscoveryContext(discovery),
+    planContent,
+    projectSkills: repoGuidance,
+    planFile,
+    branchContextFile,
+  };
 
-  const allResults = [...phase1Results, exerciserResult, ...customSequentialResults];
+  const parallelReviewSteps = config.customVerificationSteps.filter(
+    (step) => step.phase === "parallel-review"
+  );
 
-  // ── Phase 3: Synthesis ────────────────────────────────────────────────────
+  const allParallelNames = [
+    ...BUILTIN_PARALLEL_SKILLS,
+    ...parallelReviewSteps.map((step) => step.name),
+  ];
+  process.stdout.write(
+    `\n  [verify] Running parallel-review steps: ${allParallelNames.join(", ")}\n`
+  );
 
-  process.stdout.write(`  [verify] Synthesizing findings...\n`);
+  const parallelResults = await Promise.allSettled([
+    ...BUILTIN_PARALLEL_SKILLS.map((skill) =>
+      runBuiltinStep({
+        skill,
+        cwd,
+        verifyDir,
+        commonVars,
+        config,
+        env,
+      })
+    ),
+    ...parallelReviewSteps.map((step) =>
+      runParallelReviewCustomStep({
+        step,
+        cwd,
+        verifyDir,
+        branchContextFile,
+        planFile,
+        planContent,
+        config,
+        env,
+      })
+    ),
+  ]);
+
+  const phase1Results: SkillResult[] = parallelResults.map((result, index) => {
+    const stepName = allParallelNames[index] ?? "unknown-step";
+    if (result.status === "fulfilled") {
+      return result.value;
+    }
+    return frameworkThrownStep(stepName, `Verification step threw before producing artifacts: ${String(result.reason)}`);
+  });
+
+  process.stdout.write("  [verify] Running deterministic steps sequentially...\n");
+  const deterministicResults = await runDeterministicCommands({
+    discovery,
+    cwd,
+    verifyDir,
+    config,
+    branchContextFile,
+    planFile,
+    planContent,
+    env,
+  });
+
+  const preExerciserResults = [...phase1Results, ...deterministicResults];
+
+  process.stdout.write("  [verify] Running exerciser...\n");
+  const exerciserResult = await runBuiltinStep({
+    skill: "exerciser",
+    cwd,
+    verifyDir,
+    commonVars: {
+      ...commonVars,
+      phase1Findings: buildPhase1FindingsSummary(preExerciserResults),
+    },
+    config,
+    env,
+  });
+
+  const allResults = [...preExerciserResults, exerciserResult];
+
+  process.stdout.write("  [verify] Synthesizing findings...\n");
   const report = await runSynthesis({
     cwd,
     verifyDir,
+    planFile,
+    branchContextFile,
     allResults,
-    commonVars,
     config,
     env,
   });
 
-  // Write final output
   await writeJsonFile(join(turnDir, "verify.json"), report);
-
   return report;
 }
 
-/**
- * Run a single built-in skill via the harness.
- */
-async function runSkill(options: {
+async function runBuiltinStep(options: {
   skill: string;
   cwd: string;
-  skillsDir: string;
-  scope: VerifyScope;
-  discovery: ToolchainDiscovery;
+  verifyDir: string;
   commonVars: Record<string, string>;
   config: AdversaryConfig;
   env?: NodeJS.ProcessEnv;
-  timeoutMs: number;
 }): Promise<SkillResult> {
-  const { skill, cwd, skillsDir, commonVars, config, env, timeoutMs } = options;
+  const { skill, cwd, verifyDir, commonVars, config, env } = options;
+  const stepDir = await ensureStepDir(verifyDir, skill);
 
-  const override = config.skillOverrides[skill];
   let template: string;
   try {
-    template = await loadSkillTemplate(skill, override);
-  } catch (e) {
-    process.stderr.write(`  Warning: failed to load skill template "${skill}": ${e}\n`);
-    return {
-      skill,
-      exitCode: 1,
-      durationMs: 0,
-      findings: [],
-      status: "error",
-    };
+    template = await loadSkillTemplate(skill, config.skillOverrides[skill]);
+  } catch (error) {
+    const finding = metaFinding(skill, `Failed to load prompt template for verification step \`${skill}\`: ${String(error)}`);
+    await writeJsonFile(join(stepDir, "output.json"), { skill, status: "error", findings: [finding] });
+    return { skill, exitCode: 1, durationMs: 0, findings: [finding], status: "error", artifactDir: stepDir };
   }
 
-  // Interpolate all variables. Use a function replacement to prevent `$`
-  // in user-derived values being interpreted as special replacement patterns
-  // (e.g. $&, $', $$) by String.replace().
   let prompt = template;
   for (const [key, value] of Object.entries(commonVars)) {
-    const safeValue = value;
-    prompt = prompt.replace(new RegExp(`\\{${key}\\}`, "g"), () => safeValue);
+    prompt = prompt.replace(new RegExp(`\\{${key}\\}`, "g"), () => value);
   }
 
-  // Warn if any {word} placeholders remain after interpolation — this indicates
-  // a template references a variable that was not provided.
-  const remaining = prompt.match(/\{[a-zA-Z][a-zA-Z0-9_]*\}/g);
-  if (remaining) {
-    const unique = [...new Set(remaining)].join(", ");
-    process.stderr.write(
-      `  Warning: skill "${skill}" prompt has unreplaced placeholders after interpolation: ${unique}\n`
-    );
-  }
-
-  // Write prompt file
-  const promptPath = join(skillsDir, `${skill}.prompt.md`);
+  const promptPath = join(stepDir, "prompt.md");
   await writeText(promptPath, prompt);
 
-  // Run harness
-  const vars: Record<string, string> = { promptFile: promptPath };
-  const command = interpolate(config.verifyCommandTemplate, vars);
-  const stdoutPath = join(skillsDir, `${skill}.stdout.log`);
-  const stderrPath = join(skillsDir, `${skill}.stderr.log`);
+  const command = interpolate(config.verifyCommandTemplate, { promptFile: promptPath });
+  const stdoutPath = join(stepDir, "stdout.log");
+  const stderrPath = join(stepDir, "stderr.log");
 
   const stepResult = await runStep({
     command,
     cwd,
     stdoutPath,
     stderrPath,
-    timeoutMs,
+    timeoutMs: config.verifyTimeoutMs,
     label: skill,
     env,
   });
 
-  // Parse findings from stdout
   const stdoutText = await Bun.file(stdoutPath).text();
-  const { findings, status } = parseSkillOutput(stdoutText, skill, stepResult.timedOut);
+  const stderrText = await Bun.file(stderrPath).text();
+  await writeTruncatedHelperArtifacts({ stepDir, stdoutText, stderrText });
 
-  // Write parsed output
-  await writeJsonFile(join(skillsDir, `${skill}.output.json`), { skill, status, findings });
-
-  const durationSecs = Math.round(stepResult.durationMs / 1000);
-  process.stdout.write(
-    `  [verify] ${skill} completed (${durationSecs}s, ${findings.length} finding${findings.length !== 1 ? "s" : ""}, status: ${status})\n`
-  );
+  const parsed = parseBuiltinStepOutput(stdoutText, skill, stepResult.timedOut);
+  await writeJsonFile(join(stepDir, "output.json"), {
+    skill,
+    status: parsed.status,
+    findings: parsed.findings,
+    step: {
+      exitCode: stepResult.exitCode,
+      timedOut: stepResult.timedOut,
+      durationMs: stepResult.durationMs,
+      artifactDir: stepDir,
+    },
+  });
 
   return {
     skill,
     exitCode: stepResult.exitCode,
     durationMs: stepResult.durationMs,
-    findings,
-    status,
+    findings: parsed.findings,
+    status: parsed.status,
+    artifactDir: stepDir,
   };
 }
 
-/**
- * Run a custom verification step via its command template.
- *
- * Note: custom steps do not receive a generated prompt file. The {promptFile}
- * variable is NOT available in custom step commandTemplates — use the other
- * template variables ({scopeContext}, {discoveryJson}, etc.) instead.
- */
-async function runCustomStep(options: {
-  step: { name: string; commandTemplate: string; phase: string; timeoutMs?: number };
+async function runParallelReviewCustomStep(options: {
+  step: CustomVerificationStep;
   cwd: string;
-  skillsDir: string;
-  scope: VerifyScope;
-  commonVars: Record<string, string>;
+  verifyDir: string;
+  branchContextFile: string;
+  planFile: string;
+  planContent: string;
   config: AdversaryConfig;
   env?: NodeJS.ProcessEnv;
 }): Promise<SkillResult> {
-  const { step, cwd, skillsDir, commonVars, config, env } = options;
-  const timeoutMs = step.timeoutMs ?? config.verifyTimeoutMs;
-
-  // Warn at runtime if the custom step template references {promptFile} — custom steps
-  // do not receive a generated prompt file; only built-in skills use {promptFile}.
-  if (step.commandTemplate.includes("{promptFile}")) {
-    process.stderr.write(
-      `  Warning: custom step "${step.name}" commandTemplate contains {promptFile}, which is not available for custom steps. ` +
-        `Use {contextFile} to pass the full context, or other scalar template variables instead.\n`
-    );
-  }
-
-  // Build safe scalar vars for template interpolation.
-  // Multi-line vars (scopeContext, planContent, etc.) must NOT be interpolated directly
-  // into a shell command template — they break shell parsing and enable injection.
-  // Instead, write all context to a file and expose it via {contextFile}.
-  const contextFilePath = join(skillsDir, `${step.name}.context.txt`);
-  const contextContent = [
-    `## Scope Context\n\n${commonVars.scopeContext ?? ""}`,
-    `## Scope Metadata\n\n${commonVars.scopeMetadata ?? ""}`,
-    `## Diff Stat\n\n${commonVars.diffStat ?? ""}`,
-    `## Discovery\n\n${commonVars.discoveryJson ?? ""}`,
-    `## Plan\n\n${commonVars.planContent ?? ""}`,
-    ...(commonVars.phase1Findings ? [`## Phase 1 Findings\n\n${commonVars.phase1Findings}`] : []),
-    ...(commonVars.projectSkills ? [`## Project Skills\n\n${commonVars.projectSkills}`] : []),
-  ].join("\n\n---\n\n");
-  await writeText(contextFilePath, contextContent);
-
-  // Only safe scalar vars (path-like) are interpolated into the command.
-  // The contextFile path is safe to inline — it is a filesystem path we control.
-  const vars: Record<string, string> = { contextFile: contextFilePath };
-
-  const command = interpolate(step.commandTemplate, vars);
-  const stdoutPath = join(skillsDir, `${step.name}.stdout.log`);
-  const stderrPath = join(skillsDir, `${step.name}.stderr.log`);
-
-  const stepResult = await runStep({
-    command,
-    cwd,
-    stdoutPath,
-    stderrPath,
-    timeoutMs,
-    label: step.name,
-    env,
+  const { step, cwd, verifyDir, branchContextFile, planFile, planContent, config, env } = options;
+  const stepDir = await ensureStepDir(verifyDir, step.name);
+  const contextFile = await writeStepContextFile({
+    stepDir,
+    branchContextFile,
+    planFile,
+    planContent,
+    extraSections: [{ title: "Custom step", body: `Name: ${step.name}\nPhase: ${step.phase}` }],
   });
 
-  const stdoutText = await Bun.file(stdoutPath).text();
-  const { findings, status } = parseSkillOutput(stdoutText, step.name, stepResult.timedOut);
+  const command = interpolate(step.commandTemplate, { contextFile, planFile, cwd });
+  const stdoutPath = join(stepDir, "stdout.log");
+  const stderrPath = join(stepDir, "stderr.log");
+  const timeoutMs = step.timeoutMs ?? config.verifyTimeoutMs;
 
-  await writeJsonFile(join(skillsDir, `${step.name}.output.json`), { skill: step.name, status, findings });
+  try {
+    const stepResult = await runStep({
+      command,
+      rawArgv: ["sh", "-c", command],
+      cwd,
+      stdoutPath,
+      stderrPath,
+      timeoutMs,
+      label: step.name,
+      env,
+    });
 
-  return {
-    skill: step.name,
-    exitCode: stepResult.exitCode,
-    durationMs: stepResult.durationMs,
-    findings,
-    status,
-  };
+    const stdoutText = await Bun.file(stdoutPath).text();
+    const stderrText = await Bun.file(stderrPath).text();
+    const helperArtifacts = await writeTruncatedHelperArtifacts({ stepDir, stdoutText, stderrText });
+
+    let findings: VerifyFinding[];
+    let status: SkillResult["status"];
+
+    if (stepResult.timedOut) {
+      findings = [metaFinding(step.name, `Parallel-review step \`${step.name}\` timed out after ${Math.round(timeoutMs / 1000)}s.`)];
+      status = "timeout";
+    } else if (stdoutText.trim() || stderrText.trim()) {
+      findings = await analyzeToolOutput({
+        stepName: step.name,
+        stepDir,
+        branchContextFile,
+        stdoutPath,
+        stderrPath,
+        helperArtifacts,
+        exitCode: stepResult.exitCode,
+        timedOut: false,
+        config,
+        cwd,
+        env,
+      });
+      status = stepResult.exitCode === 0 ? "completed" : "error";
+    } else if (stepResult.exitCode !== 0) {
+      findings = [metaFinding(step.name, `Parallel-review step \`${step.name}\` exited non-zero with no readable output.`)];
+      status = "error";
+    } else {
+      findings = [];
+      status = "completed";
+    }
+
+    await writeJsonFile(join(stepDir, "output.json"), {
+      skill: step.name,
+      status,
+      findings,
+      step: {
+        exitCode: stepResult.exitCode,
+        timedOut: stepResult.timedOut,
+        durationMs: stepResult.durationMs,
+        artifactDir: stepDir,
+        contextFile,
+      },
+    });
+
+    return {
+      skill: step.name,
+      exitCode: stepResult.exitCode,
+      durationMs: stepResult.durationMs,
+      findings,
+      status,
+      artifactDir: stepDir,
+    };
+  } catch (error) {
+    const finding = metaFinding(step.name, `Parallel-review step \`${step.name}\` failed to run: ${String(error)}`);
+    await writeJsonFile(join(stepDir, "output.json"), { skill: step.name, status: "error", findings: [finding] });
+    return { skill: step.name, exitCode: 1, durationMs: 0, findings: [finding], status: "error", artifactDir: stepDir };
+  }
 }
 
-/**
- * Parse skill output JSON from stdout.
- */
-function parseSkillOutput(
+function parseBuiltinStepOutput(
   stdout: string,
   skillName: string,
   timedOut: boolean
 ): { findings: VerifyFinding[]; status: SkillResult["status"] } {
   if (timedOut) {
-    return { findings: [], status: "timeout" };
+    return {
+      findings: [metaFinding(skillName, `Verification step \`${skillName}\` timed out before producing structured output.`)],
+      status: "timeout",
+    };
   }
 
   try {
     const parsed = extractJson(stdout) as Record<string, unknown>;
-    const VALID_STATUSES: ReadonlySet<string> = new Set(["completed", "blocked", "error", "timeout"]);
-    const rawStatus = typeof parsed.status === "string" && VALID_STATUSES.has(parsed.status)
-      ? (parsed.status as SkillResult["status"])
-      : "completed";
-    const status = rawStatus;
     const rawFindings = Array.isArray(parsed.findings) ? parsed.findings : [];
-    const findings: VerifyFinding[] = [];
-
-    for (let i = 0; i < rawFindings.length; i++) {
-      const f = rawFindings[i] as Record<string, unknown>;
-      if (typeof f !== "object" || f === null) {
-        process.stderr.write(
-          `  Warning: skill "${skillName}" findings[${i}] is not an object — skipping\n`
-        );
-        continue;
-      }
-      if (typeof f.title !== "string") {
-        process.stderr.write(
-          `  Warning: skill "${skillName}" findings[${i}].title must be a string — skipping\n`
-        );
-        continue;
-      }
-      if (typeof f.severity !== "number") {
-        process.stderr.write(
-          `  Warning: skill "${skillName}" findings[${i}].severity must be a number — skipping\n`
-        );
-        continue;
-      }
-      if (typeof f.description !== "string") {
-        process.stderr.write(
-          `  Warning: skill "${skillName}" findings[${i}].description must be a string — skipping\n`
-        );
-        continue;
-      }
-      // Construct from explicit validated fields only — do not spread arbitrary LLM keys
-      const rawLocation = f.location as Record<string, unknown> | undefined;
-      const location: VerifyFinding["location"] =
-        rawLocation &&
-        typeof rawLocation === "object" &&
-        typeof rawLocation.path === "string"
-          ? {
-              path: rawLocation.path,
-              ...(typeof rawLocation.line === "number" ? { line: rawLocation.line } : {}),
-            }
-          : undefined;
-      findings.push({
-        title: f.title as string,
-        severity: f.severity as number,
-        description: f.description as string,
-        sources: Array.isArray(f.sources)
-          ? (f.sources as unknown[]).filter((s): s is string => typeof s === "string")
-          : [skillName],
-        ...(location ? { location } : {}),
-      });
-    }
-
+    const findings = validateRawFindings(rawFindings, skillName);
+    const rawStatus = parsed.status;
+    const status = rawStatus === "error" || rawStatus === "timeout" ? rawStatus : "completed";
     return { findings, status };
   } catch {
-    process.stderr.write(
-      `  Warning: could not parse output from skill "${skillName}" — treating as error\n`
-    );
-    return { findings: [], status: "error" };
+    return {
+      findings: [metaFinding(skillName, `Verification step \`${skillName}\` produced malformed output. Inspect its step artifacts.`)],
+      status: "error",
+    };
   }
 }
 
-/**
- * Run the synthesis step to deduplicate and merge all findings.
- */
+async function analyzeToolOutput(options: {
+  stepName: string;
+  stepDir: string;
+  branchContextFile: string;
+  stdoutPath: string;
+  stderrPath: string;
+  helperArtifacts: { stdoutTruncatedPath: string; stderrTruncatedPath: string };
+  exitCode: number;
+  timedOut: boolean;
+  config: AdversaryConfig;
+  cwd: string;
+  env?: NodeJS.ProcessEnv;
+}): Promise<VerifyFinding[]> {
+  const {
+    stepName,
+    stepDir,
+    branchContextFile,
+    stdoutPath,
+    stderrPath,
+    helperArtifacts,
+    exitCode,
+    timedOut,
+    config,
+    cwd,
+    env,
+  } = options;
+
+  let template: string;
+  try {
+    template = await loadSkillTemplate("tool-output-analyzer");
+  } catch {
+    return [metaFinding(stepName, `Parallel-review step \`${stepName}\` produced output, but the tool-output analyzer prompt could not be loaded.`)];
+  }
+
+  let prompt = template;
+  for (const [key, value] of Object.entries({
+    stepName,
+    branchContextFile,
+    stdoutPath,
+    stderrPath,
+    stdoutSnippetPath: helperArtifacts.stdoutTruncatedPath,
+    stderrSnippetPath: helperArtifacts.stderrTruncatedPath,
+    exitCode: String(exitCode),
+    timedOut: String(timedOut),
+  })) {
+    prompt = prompt.replace(new RegExp(`\\{${key}\\}`, "g"), () => value);
+  }
+
+  const promptPath = join(stepDir, "analysis.prompt.md");
+  await writeText(promptPath, prompt);
+
+  const command = interpolate(config.verifyCommandTemplate, { promptFile: promptPath });
+  const stdoutAnalysisPath = join(stepDir, "analysis.stdout.log");
+  const stderrAnalysisPath = join(stepDir, "analysis.stderr.log");
+
+  try {
+    const analyzerStep = await runStep({
+      command,
+      cwd,
+      stdoutPath: stdoutAnalysisPath,
+      stderrPath: stderrAnalysisPath,
+      timeoutMs: config.verifyTimeoutMs,
+      label: `${stepName}-analysis`,
+      env,
+    });
+
+    if (analyzerStep.timedOut || analyzerStep.exitCode !== 0) {
+      return [metaFinding(stepName, `Parallel-review step \`${stepName}\` produced output, but analysis failed.`)];
+    }
+
+    const analysisStdout = await Bun.file(stdoutAnalysisPath).text();
+    const parsed = extractJson(analysisStdout) as Record<string, unknown>;
+    const rawFindings = Array.isArray(parsed.findings) ? parsed.findings : [];
+    const findings = validateRawFindings(rawFindings, stepName);
+
+    return findings.length > 0
+      ? findings
+      : exitCode === 0
+        ? []
+        : [metaFinding(stepName, `Parallel-review step \`${stepName}\` exited non-zero, but analysis found no structured findings.`)];
+  } catch {
+    return [metaFinding(stepName, `Parallel-review step \`${stepName}\` produced malformed analysis output.`)];
+  }
+}
+
 async function runSynthesis(options: {
   cwd: string;
   verifyDir: string;
+  planFile: string;
+  branchContextFile: string;
   allResults: SkillResult[];
-  commonVars: Record<string, string>;
   config: AdversaryConfig;
   env?: NodeJS.ProcessEnv;
 }): Promise<VerifyReport> {
-  const { cwd, verifyDir, allResults, commonVars, config, env } = options;
-
-  const skillFindingsJson = buildSkillFindingsJson(allResults);
+  const { cwd, verifyDir, planFile, branchContextFile, allResults, config, env } = options;
+  const synthesisDir = join(verifyDir, "synthesis");
+  await ensureDir(synthesisDir);
 
   let template: string;
   try {
     template = await loadSkillTemplate("synthesis", config.skillOverrides?.synthesis);
-  } catch (e) {
-    process.stderr.write(`  Warning: failed to load synthesis template: ${e}\n`);
-    return synthesizeFallback(allResults);
+  } catch {
+    const fallback = synthesizeFallback(allResults);
+    await writeJsonFile(join(synthesisDir, "output.json"), fallback);
+    return fallback;
   }
 
-  // Interpolate {skillFindings} and all commonVars into the template.
-  // Use function replacement to prevent `$` in values being misinterpreted as
-  // special replacement patterns (e.g. $&, $', $$).
+  const stepsJson = JSON.stringify(
+    allResults.map((result) => ({
+      skill: result.skill,
+      status: result.status,
+      exitCode: result.exitCode,
+      durationMs: result.durationMs,
+      artifactDir: result.artifactDir,
+      findings: result.findings,
+    })),
+    null,
+    2
+  );
+
   let prompt = template;
-  for (const [key, value] of Object.entries({ ...commonVars, skillFindings: skillFindingsJson })) {
+  for (const [key, value] of Object.entries({ stepsJson, planFile, branchContextFile })) {
     prompt = prompt.replace(new RegExp(`\\{${key}\\}`, "g"), () => value);
   }
-  const promptPath = join(verifyDir, "synthesis.prompt.md");
+
+  const promptPath = join(synthesisDir, "prompt.md");
   await writeText(promptPath, prompt);
 
-  const vars: Record<string, string> = { promptFile: promptPath };
-  const command = interpolate(config.verifyCommandTemplate, vars);
-  const stdoutPath = join(verifyDir, "synthesis.stdout.log");
-  const stderrPath = join(verifyDir, "synthesis.stderr.log");
+  const command = interpolate(config.verifyCommandTemplate, { promptFile: promptPath });
+  const stdoutPath = join(synthesisDir, "stdout.log");
+  const stderrPath = join(synthesisDir, "stderr.log");
 
   const stepResult = await runStep({
     command,
@@ -488,70 +510,52 @@ async function runSynthesis(options: {
 
   try {
     const parsed = extractJson(stdoutText) as Record<string, unknown>;
-
-    // Validate it looks like a VerifyReport
-    if (
-      parsed.schemaVersion === 1 &&
-      ["ok", "blocked", "error"].includes(parsed.status as string) &&
-      Array.isArray(parsed.findings)
-    ) {
-      // Validate individual findings (skip malformed ones with a warning)
-      const validFindings: VerifyFinding[] = [];
-      const rawFindings = parsed.findings as unknown[];
-      for (let i = 0; i < rawFindings.length; i++) {
-        const f = rawFindings[i] as Record<string, unknown>;
-        if (
-          typeof f === "object" &&
-          f !== null &&
-          typeof f.title === "string" &&
-          typeof f.severity === "number" &&
-          typeof f.description === "string"
-        ) {
-          // Construct from explicit validated fields only — do not spread arbitrary LLM keys
-          const sources = Array.isArray(f.sources)
-            ? (f.sources as unknown[]).filter((s): s is string => typeof s === "string")
-            : ["synthesis"];
-          const rawLoc = f.location as Record<string, unknown> | undefined;
-          const loc: VerifyFinding["location"] =
-            rawLoc &&
-            typeof rawLoc === "object" &&
-            typeof rawLoc.path === "string"
-              ? {
-                  path: rawLoc.path,
-                  ...(typeof rawLoc.line === "number" ? { line: rawLoc.line } : {}),
-                }
-              : undefined;
-          validFindings.push({
-            title: f.title as string,
-            severity: f.severity as number,
-            description: f.description as string,
-            sources,
-            ...(loc ? { location: loc } : {}),
-          });
-        } else {
-          process.stderr.write(
-            `  Warning: synthesis findings[${i}] is malformed — skipping\n`
-          );
-        }
-      }
-
+    if (parsed.schemaVersion === 1 && ["ok", "error"].includes(String(parsed.status)) && Array.isArray(parsed.findings)) {
       const report: VerifyReport = {
         schemaVersion: 1,
-        status: parsed.status as VerifyReport["status"],
-        findings: validFindings,
+        // A synthesized findings report should not be able to terminate the loop
+        // just because the LLM labeled ordinary defects as top-level "error".
+        // If synthesis produced structured findings, treat that as a usable
+        // verify result and let threshold handling decide whether to continue.
+        status: "ok",
+        findings: synthesizeFallback([
+          {
+            skill: "synthesis",
+            exitCode: stepResult.exitCode,
+            durationMs: stepResult.durationMs,
+            findings: validateRawFindings(parsed.findings as unknown[], "synthesis"),
+            status: "completed",
+            artifactDir: synthesisDir,
+          },
+        ]).findings,
       };
-
-      await writeJsonFile(join(verifyDir, "synthesis.output.json"), report);
+      await writeJsonFile(join(synthesisDir, "output.json"), report);
       return report;
     }
   } catch {
-    // fall through to fallback
+    // fall through
   }
 
-  process.stderr.write(
-    `  Warning: synthesis output parse failed (exit ${stepResult.exitCode}), using deterministic fallback\n`
-  );
   const fallback = synthesizeFallback(allResults);
-  await writeJsonFile(join(verifyDir, "synthesis.output.json"), fallback);
+  await writeJsonFile(join(synthesisDir, "output.json"), fallback);
   return fallback;
+}
+
+function metaFinding(source: string, description: string): VerifyFinding {
+  return {
+    title: `${source} verification step failed`,
+    severity: 8,
+    description,
+    sources: [source],
+  };
+}
+
+function frameworkThrownStep(stepName: string, description: string): SkillResult {
+  return {
+    skill: stepName,
+    exitCode: 1,
+    durationMs: 0,
+    findings: [metaFinding(stepName, description)],
+    status: "error",
+  };
 }
