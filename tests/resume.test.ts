@@ -1832,11 +1832,22 @@ describe("resumeCommand — HeadDriftError catch format (VI-3)", () => {
   let stateDir: string;
   let savedXdgState: string | undefined;
   let repoDir: string;
+  let fakeBinDir: string;
 
   beforeAll(async () => {
     stateDir = await mkdtemp(join(tmpdir(), "adversary-head-drift-cmd-"));
     savedXdgState = process.env.XDG_STATE_HOME;
     process.env.XDG_STATE_HOME = stateDir;
+
+    // Create fake binaries so preflight passes without requiring real pi/gh in PATH
+    fakeBinDir = join(stateDir, "fakebin");
+    await mkdir(fakeBinDir, { recursive: true });
+    const { writeFileSync: wfs } = await import("node:fs");
+    wfs(join(fakeBinDir, "gh"), `#!/bin/sh\nif [ "$1" = "auth" ] && [ "$2" = "status" ]; then exit 0; fi\necho "https://github.com/test/test/pull/1"\nexit 0\n`, { mode: 0o755 });
+    wfs(join(fakeBinDir, "glab"), `#!/bin/sh\nexit 1\n`, { mode: 0o755 });
+    wfs(join(fakeBinDir, "fake-impl"), `#!/bin/sh\nexit 0\n`, { mode: 0o755 });
+    wfs(join(fakeBinDir, "fake-verify"), `#!/bin/sh\nexit 0\n`, { mode: 0o755 });
+    wfs(join(fakeBinDir, "fake-summarizer"), `#!/bin/sh\nexit 0\n`, { mode: 0o755 });
 
     repoDir = await mkdtemp(join(stateDir, "repo-"));
     await gitInit(repoDir);
@@ -1880,7 +1891,11 @@ describe("resumeCommand — HeadDriftError catch format (VI-3)", () => {
         startedAt: "2024-07-01T12:00:00.000Z",
         turns: 5,
         threshold: 7,
-        config: {},
+        config: {
+          implementCommandTemplate: `${join(fakeBinDir, "fake-impl")} @{promptFile}`,
+          verifyCommandTemplate: `${join(fakeBinDir, "fake-verify")} @{promptFile}`,
+          summarizerCommandTemplate: `${join(fakeBinDir, "fake-summarizer")} @{promptFile}`,
+        },
       })
     );
 
@@ -1921,6 +1936,15 @@ describe("resumeCommand — HeadDriftError catch format (VI-3)", () => {
     });
     await reset.exited;
 
+    // Re-write .adversary.json after the reset (git reset --hard removes untracked files).
+    // This ensures preflight sees fake harnesses and passes in CI where real pi is absent.
+    const { writeFileSync: wfsAfterReset } = await import("node:fs");
+    wfsAfterReset(join(repoDir, ".adversary.json"), JSON.stringify({
+      implementCommandTemplate: `${join(fakeBinDir, "fake-impl")} @{promptFile}`,
+      verifyCommandTemplate: `${join(fakeBinDir, "fake-verify")} @{promptFile}`,
+      summarizerCommandTemplate: `${join(fakeBinDir, "fake-summarizer")} @{promptFile}`,
+    }));
+
     const originalExit = process.exit;
     let exitCode: number | undefined;
     process.exit = ((code?: number) => { exitCode = code; throw new Error(`process.exit(${code})`); }) as never;
@@ -1935,8 +1959,10 @@ describe("resumeCommand — HeadDriftError catch format (VI-3)", () => {
     const originalIsTTY = process.stdin.isTTY;
     Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
 
+    const fakeEnv: NodeJS.ProcessEnv = { ...process.env, PATH: `${fakeBinDir}:${process.env.PATH ?? ""}` };
+
     try {
-      await resumeCommand({ runId: "20240701-120000-drift-cmd", cwd: repoDir });
+      await resumeCommand({ runId: "20240701-120000-drift-cmd", cwd: repoDir, env: fakeEnv });
     } catch {
       // Expected process.exit(1)
     } finally {
@@ -3243,6 +3269,9 @@ describe("resumeCommand — pops stale failed-turn entry on re-entry (VI-1 codex
     // Fast-failing implement harness: exits 1 immediately so runLoop records implement-failure
     // and returns quickly without running the slow verify pipeline.
     wfs(join(fakeBinDir, "fake-impl-fail"), `#!/bin/sh\nexit 1\n`, { mode: 0o755 });
+    // Fake verify and summarizer — needed so preflight succeeds in CI where real pi is absent
+    wfs(join(fakeBinDir, "fake-verify"), `#!/bin/sh\nexit 0\n`, { mode: 0o755 });
+    wfs(join(fakeBinDir, "fake-summarizer"), `#!/bin/sh\nexit 0\n`, { mode: 0o755 });
 
     repoDir = await mkdtemp(join(stateDir, "repo-"));
     await gitInit(repoDir);
@@ -3255,9 +3284,12 @@ describe("resumeCommand — pops stale failed-turn entry on re-entry (VI-1 codex
 
     // Write .adversary.json with a fast-failing implement harness so runLoop exits quickly
     // (exits 1 → implement-failure) without running the slow verify pipeline.
+    // All three templates are set so preflight passes in CI where real pi is absent.
     const { writeFileSync: wfs2 } = await import("node:fs");
     wfs2(join(repoDir, ".adversary.json"), JSON.stringify({
       implementCommandTemplate: `${join(fakeBinDir, "fake-impl-fail")} @{promptFile}`,
+      verifyCommandTemplate: `${join(fakeBinDir, "fake-verify")} @{promptFile}`,
+      summarizerCommandTemplate: `${join(fakeBinDir, "fake-summarizer")} @{promptFile}`,
     }));
     const addCfg = Bun.spawn(["git", "add", ".adversary.json"], { cwd: repoDir, stdout: "pipe", stderr: "pipe" });
     await addCfg.exited;
