@@ -10,7 +10,7 @@ import type {
   ResumePoint,
 } from "../types/index.js";
 import { runStep } from "../runner/index.js";
-import { hasChanges, commitAll, GitError } from "../git/index.js";
+import { hasChanges, commitAll, GitError, computeTouchedFilesByTurn } from "../git/index.js";
 import {
   generateFirstTurnPrompt,
   generateLaterTurnPrompt,
@@ -159,6 +159,7 @@ export async function runLoop(options: {
       } else {
         const lastTurn = priorTurns[priorTurns.length - 1];
         const thresholdFindings = lastTurn?.thresholdFindings ?? [];
+        const { fileToTurns, commitFailureTurns } = await computeTouchedFilesByTurn(priorTurns, cwd);
         await generateLaterTurnPrompt({
           planContent,
           threshold,
@@ -170,6 +171,8 @@ export async function runLoop(options: {
           repoGuidance,
           outputPath: promptPath,
           resumeNote,
+          touchedFilesByTurn: fileToTurns,
+          commitFailureTurns,
         });
       }
     }

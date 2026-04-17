@@ -17,6 +17,8 @@ import {
   lsRemoteHasBranch,
   getRemoteBranchSha,
   getStatusShort,
+  getFilesChangedByCommit,
+  computeTouchedFilesByTurn,
 } from "../src/git/index.js";
 
 async function gitInit(dir: string): Promise<void> {
@@ -411,5 +413,256 @@ describe("getStatusShort — ignoreUntracked option (VI-7)", () => {
     } finally {
       await rm(cleanDir, { recursive: true, force: true });
     }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// getFilesChangedByCommit and computeTouchedFilesByTurn
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("getFilesChangedByCommit", () => {
+  let touchedDir: string;
+  let sha1: string;
+  let sha2: string;
+
+  beforeAll(async () => {
+    touchedDir = await mkdtemp(join(tmpdir(), "adversary-touched-"));
+    const run = async (args: string[], cwd: string): Promise<string> => {
+      const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+      await proc.exited;
+      return (await new Response(proc.stdout).text()).trim();
+    };
+
+    await run(["init", "-b", "main"], touchedDir);
+    await run(["config", "user.email", "t@t.com"], touchedDir);
+    await run(["config", "user.name", "T"], touchedDir);
+
+    // Commit 1: add two files
+    await writeFile(join(touchedDir, "alpha.ts"), "export const a = 1;");
+    await writeFile(join(touchedDir, "beta.ts"), "export const b = 2;");
+    await run(["add", "."], touchedDir);
+    await run(["commit", "-m", "first commit"], touchedDir);
+    sha1 = await run(["rev-parse", "HEAD"], touchedDir);
+
+    // Commit 2: add a different file
+    await writeFile(join(touchedDir, "gamma.ts"), "export const c = 3;");
+    await run(["add", "."], touchedDir);
+    await run(["commit", "-m", "second commit"], touchedDir);
+    sha2 = await run(["rev-parse", "HEAD"], touchedDir);
+  });
+
+  afterAll(async () => {
+    await rm(touchedDir, { recursive: true, force: true });
+  });
+
+  test("returns files changed by a commit", async () => {
+    const files = await getFilesChangedByCommit(sha1, touchedDir);
+    expect(files).toContain("alpha.ts");
+    expect(files).toContain("beta.ts");
+    expect(files).not.toContain("gamma.ts");
+  });
+
+  test("returns only the file added in second commit", async () => {
+    const files = await getFilesChangedByCommit(sha2, touchedDir);
+    expect(files).toContain("gamma.ts");
+    expect(files).not.toContain("alpha.ts");
+  });
+
+  test("returns empty array for invalid SHA", async () => {
+    const files = await getFilesChangedByCommit("0000000000000000000000000000000000000000", touchedDir);
+    expect(files).toEqual([]);
+  });
+});
+
+describe("computeTouchedFilesByTurn", () => {
+  let touchedDir2: string;
+  let sha1: string;
+  let sha2: string;
+
+  beforeAll(async () => {
+    touchedDir2 = await mkdtemp(join(tmpdir(), "adversary-touched2-"));
+    const run = async (args: string[], cwd: string): Promise<string> => {
+      const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+      await proc.exited;
+      return (await new Response(proc.stdout).text()).trim();
+    };
+
+    await run(["init", "-b", "main"], touchedDir2);
+    await run(["config", "user.email", "t@t.com"], touchedDir2);
+    await run(["config", "user.name", "T"], touchedDir2);
+
+    // Commit 1: add file-a.ts
+    await writeFile(join(touchedDir2, "file-a.ts"), "a");
+    await run(["add", "."], touchedDir2);
+    await run(["commit", "-m", "turn 1"], touchedDir2);
+    sha1 = await run(["rev-parse", "HEAD"], touchedDir2);
+
+    // Commit 2: add file-b.ts (also touches file-a.ts)
+    await writeFile(join(touchedDir2, "file-a.ts"), "a-modified");
+    await writeFile(join(touchedDir2, "file-b.ts"), "b");
+    await run(["add", "."], touchedDir2);
+    await run(["commit", "-m", "turn 2"], touchedDir2);
+    sha2 = await run(["rev-parse", "HEAD"], touchedDir2);
+  });
+
+  afterAll(async () => {
+    await rm(touchedDir2, { recursive: true, force: true });
+  });
+
+  test("maps files to turn numbers for multiple turns with commitSha", async () => {
+    const { fileToTurns } = await computeTouchedFilesByTurn([
+      { turn: 1, commitSha: sha1 },
+      { turn: 2, commitSha: sha2 },
+    ], touchedDir2);
+
+    // file-a.ts touched in turn 1 (added) and turn 2 (modified)
+    const aTurns = fileToTurns.get("file-a.ts");
+    expect(aTurns).toBeDefined();
+    expect(aTurns!.map((e) => e.turn)).toContain(1);
+    expect(aTurns!.map((e) => e.turn)).toContain(2);
+
+    // file-b.ts touched only in turn 2
+    const bTurns = fileToTurns.get("file-b.ts");
+    expect(bTurns).toBeDefined();
+    expect(bTurns!.map((e) => e.turn)).toEqual([2]);
+  });
+
+  test("turn entries include short SHA", async () => {
+    const { fileToTurns } = await computeTouchedFilesByTurn([
+      { turn: 1, commitSha: sha1 },
+    ], touchedDir2);
+
+    const aTurns = fileToTurns.get("file-a.ts");
+    expect(aTurns).toBeDefined();
+    expect(aTurns![0]!.sha).toBe(sha1.slice(0, 7));
+  });
+
+  test("turn numbers are sorted ascending even when input is reverse-ordered", async () => {
+    // Input is intentionally in descending order — sort must produce ascending output.
+    const { fileToTurns } = await computeTouchedFilesByTurn([
+      { turn: 2, commitSha: sha2 },
+      { turn: 1, commitSha: sha1 },
+    ], touchedDir2);
+
+    const aTurns = fileToTurns.get("file-a.ts")!;
+    const turnNums = aTurns.map((e) => e.turn);
+    // Explicit expected order — not a self-sort.
+    expect(turnNums).toEqual([1, 2]);
+  });
+
+  test("deduplicates turn when same (turn, sha) is passed twice", async () => {
+    // Simulate passing turn 1 twice with the exact same SHA — dedup must fire.
+    const { fileToTurns } = await computeTouchedFilesByTurn([
+      { turn: 1, commitSha: sha1 },
+      { turn: 1, commitSha: sha1 }, // exact duplicate
+    ], touchedDir2);
+
+    const aTurns = fileToTurns.get("file-a.ts");
+    expect(aTurns).toBeDefined();
+    // Turn 1 must appear exactly once, not twice.
+    const count = aTurns!.filter((e) => e.turn === 1).length;
+    expect(count).toBe(1);
+  });
+
+  test("deduplicates turn when same turn number appears with two different SHAs (first SHA wins)", async () => {
+    // Resume scenario: same turn number re-run with a new SHA.
+    // sha1 touches file-a.ts, sha2 also touches file-a.ts.
+    // When both have turn=1, the first SHA encountered should win (dedup on turn number).
+    const { fileToTurns } = await computeTouchedFilesByTurn([
+      { turn: 1, commitSha: sha1 },
+      { turn: 1, commitSha: sha2 }, // same turn, different SHA
+    ], touchedDir2);
+
+    const aTurns = fileToTurns.get("file-a.ts");
+    expect(aTurns).toBeDefined();
+    // Turn 1 must appear exactly once.
+    const count = aTurns!.filter((e) => e.turn === 1).length;
+    expect(count).toBe(1);
+    // The first SHA wins.
+    expect(aTurns!.find((e) => e.turn === 1)!.sha).toBe(sha1.slice(0, 7));
+  });
+
+  test("same-turn-different-SHA: all files for that turn show the same (first) SHA", async () => {
+    // sha1 touches file-a.ts only; sha2 touches both file-a.ts and file-b.ts.
+    // When both are labeled turn 1, canonicalization must pick sha1 for the whole turn.
+    // Result: file-a.ts shows sha1, file-b.ts shows sha1 (NOT sha2).
+    // This validates that the per-turn SHA is resolved BEFORE expanding to files.
+    const { fileToTurns } = await computeTouchedFilesByTurn([
+      { turn: 1, commitSha: sha1 },
+      { turn: 1, commitSha: sha2 }, // same turn, different SHA — sha1 wins
+    ], touchedDir2);
+
+    const aTurns = fileToTurns.get("file-a.ts");
+    expect(aTurns).toBeDefined();
+    expect(aTurns!.find((e) => e.turn === 1)!.sha).toBe(sha1.slice(0, 7));
+
+    // file-b.ts was only touched by sha2 (the discarded SHA), so it should NOT appear.
+    // The canonical SHA for turn 1 is sha1, which does not touch file-b.ts.
+    expect(fileToTurns.has("file-b.ts")).toBe(false);
+  });
+
+  test("records summarizer-failure turns in commitFailureTurns (uncommitted edits)", async () => {
+    // summarizer-failure: repoChanged=true but no commitSha (commit-message generator failed
+    // before commit). The working tree still carries those edits, so the turn must surface.
+    const { fileToTurns, commitFailureTurns } = await computeTouchedFilesByTurn([
+      { turn: 1, commitSha: undefined, outcome: "summarizer-failure", repoChanged: true },
+      { turn: 2, commitSha: sha2 },
+    ], touchedDir2);
+
+    // Turn 1 has no commit, so no files attributed to it.
+    const allTurns = new Set(Array.from(fileToTurns.values()).flat().map((e) => e.turn));
+    expect(allTurns.has(1)).toBe(false);
+    expect(allTurns.has(2)).toBe(true);
+
+    // Turn 1 must appear in commitFailureTurns so the prompt surfaces the uncommitted edits.
+    expect(commitFailureTurns).toContain(1);
+    expect(commitFailureTurns).not.toContain(2);
+  });
+
+  test("skips commit-failure turns (outcome:commit-failure) and records them in commitFailureTurns", async () => {
+    const { fileToTurns, commitFailureTurns } = await computeTouchedFilesByTurn([
+      { turn: 1, commitSha: undefined, outcome: "commit-failure" },
+      { turn: 2, commitSha: sha2 },
+    ], touchedDir2);
+
+    // Only turn 2's files should appear in fileToTurns
+    const allTurns = new Set(Array.from(fileToTurns.values()).flat().map((e) => e.turn));
+    expect(allTurns.has(1)).toBe(false);
+    expect(allTurns.has(2)).toBe(true);
+
+    // Turn 1 should be recorded as a commit-failure turn
+    expect(commitFailureTurns).toContain(1);
+    expect(commitFailureTurns).not.toContain(2);
+  });
+
+  test("no-op turns (outcome:continue, repoChanged:false) are silently skipped and NOT recorded in commitFailureTurns", async () => {
+    // A no-op turn has no commitSha but outcome is "continue" (no changes were made).
+    // It must NOT appear in commitFailureTurns — the working tree is clean, so the
+    // "edits may be in the working tree" note would be incorrect.
+    const { fileToTurns, commitFailureTurns } = await computeTouchedFilesByTurn([
+      { turn: 1, commitSha: undefined, outcome: "continue", repoChanged: false },
+      { turn: 2, commitSha: undefined, outcome: "commit-failure" },
+    ], touchedDir2);
+
+    expect(fileToTurns.size).toBe(0);
+    // Only the commit-failure turn appears in commitFailureTurns.
+    expect(commitFailureTurns).not.toContain(1);
+    expect(commitFailureTurns).toContain(2);
+  });
+
+  test("returns empty map when all turns have no commitSha", async () => {
+    const { fileToTurns, commitFailureTurns } = await computeTouchedFilesByTurn([
+      { turn: 1, commitSha: undefined, outcome: "commit-failure" },
+      { turn: 2, commitSha: undefined, outcome: "commit-failure" },
+    ], touchedDir2);
+
+    expect(fileToTurns.size).toBe(0);
+    expect(commitFailureTurns).toEqual([1, 2]);
+  });
+
+  test("returns empty map for empty turns array", async () => {
+    const { fileToTurns, commitFailureTurns } = await computeTouchedFilesByTurn([], touchedDir2);
+    expect(fileToTurns.size).toBe(0);
+    expect(commitFailureTurns).toEqual([]);
   });
 });

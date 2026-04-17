@@ -178,3 +178,101 @@ export async function autoSuffixBranchName(baseName: string, cwd: string): Promi
   }
   throw new GitError(`Cannot find unique branch name for '${baseName}' (tried up to -99).`);
 }
+
+/**
+ * Returns the list of file paths changed by a single commit (using --name-only).
+ * Returns an empty array if the commit SHA is invalid or the command fails.
+ * Handles root (initial) commits that have no parent by using --root flag on diff-tree.
+ * On non-zero exit, writes a diagnostic to stderr so resume scenarios with rebased-away
+ * SHAs are observable rather than silently returning an empty list.
+ */
+export async function getFilesChangedByCommit(sha: string, cwd: string): Promise<string[]> {
+  // Use diff-tree with --root to handle both root commits and normal commits.
+  // --root: treat the commit as a diff against an empty tree (works for root commits).
+  // Without --root, root commits produce empty output since they have no parent.
+  const result = await git(["diff-tree", "--root", "--no-commit-id", "-r", "--name-only", sha], cwd);
+  if (result.exitCode === 0) {
+    return result.stdout.split("\n").filter(Boolean);
+  }
+  process.stderr.write(`[adversary] getFilesChangedByCommit: git diff-tree failed for SHA ${sha} (exit ${result.exitCode}): ${result.stderr}\n`);
+  return [];
+}
+
+/** Represents a single turn's touch of a file, including the short SHA for git inspection. */
+export interface TurnTouchEntry {
+  turn: number;
+  sha: string;
+}
+
+/**
+ * Given a list of TurnResult-like objects, computes a deduped map of file path →
+ * sorted list of TurnTouchEntry objects.
+ *
+ * When a turn has no commitSha, it is classified as follows:
+ * - `outcome === "commit-failure"` or `outcome === "summarizer-failure"`, or any turn
+ *   where `repoChanged === true` without a commitSha: recorded in `commitFailureTurns`
+ *   because uncommitted edits may remain in the working tree.
+ * - All other no-commitSha turns (e.g. outcome "continue", repoChanged false): silently
+ *   skipped — they are no-op turns with a clean working tree.
+ *
+ * When the same turn number appears with two different SHAs (resume scenario), the first
+ * SHA wins and is used consistently for all files touched by that turn.
+ *
+ * Git calls are run in parallel for efficiency.
+ */
+export async function computeTouchedFilesByTurn(
+  turns: Array<{ turn: number; commitSha?: string; outcome?: string; repoChanged?: boolean }>,
+  cwd: string
+): Promise<{ fileToTurns: Map<string, TurnTouchEntry[]>; commitFailureTurns: number[] }> {
+  const fileToTurns = new Map<string, TurnTouchEntry[]>();
+  const commitFailureTurns: number[] = [];
+
+  // Canonicalize one SHA per turn number (first SHA wins) before expanding to files.
+  // This prevents the same turn from displaying different SHAs across different files
+  // in the resume scenario where a turn is re-run with a new SHA.
+  const canonicalTurnMap = new Map<number, string>();
+  for (const t of turns) {
+    if (!t.commitSha) {
+      // Surface any turn that left uncommitted edits in the working tree.
+      // This includes explicit commit-failure and summarizer-failure outcomes,
+      // as well as any other terminal outcome where repoChanged is true but no
+      // commit was produced (general guard: !commitSha && repoChanged === true).
+      if (t.outcome === "commit-failure" || t.outcome === "summarizer-failure" || (!t.commitSha && t.repoChanged === true)) {
+        commitFailureTurns.push(t.turn);
+      }
+      continue;
+    }
+    // First SHA wins for duplicate turn numbers.
+    if (!canonicalTurnMap.has(t.turn)) {
+      canonicalTurnMap.set(t.turn, t.commitSha);
+    }
+  }
+
+  // Fetch files for all canonical turns in parallel — calls are independent.
+  const canonicalTurns = Array.from(canonicalTurnMap.entries()).map(([turn, sha]) => ({ turn, sha }));
+  const results = await Promise.all(
+    canonicalTurns.map(async (t) => ({
+      turn: t.turn,
+      sha: t.sha.slice(0, 7),
+      files: await getFilesChangedByCommit(t.sha, cwd),
+    }))
+  );
+
+  for (const { turn, sha, files } of results) {
+    for (const file of files) {
+      const existing = fileToTurns.get(file);
+      if (existing) {
+        existing.push({ turn, sha });
+      } else {
+        fileToTurns.set(file, [{ turn, sha }]);
+      }
+    }
+  }
+
+  // Sort each file's entries by turn number for deterministic output.
+  for (const entries of fileToTurns.values()) {
+    entries.sort((a, b) => a.turn - b.turn);
+  }
+
+  return { fileToTurns, commitFailureTurns };
+}
