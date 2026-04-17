@@ -10,6 +10,7 @@ import {
   renderTouchedFilesBlock,
 } from "../src/prompts/index.js";
 import type { VerifyFinding, TurnResult } from "../src/types/index.js";
+import type { TurnTouchEntry } from "../src/git/index.js";
 
 let tmpDir: string;
 
@@ -167,9 +168,9 @@ describe("generateLaterTurnPrompt", () => {
 
   test("includes touched-files block when touchedFilesByTurn is provided", async () => {
     const outputPath = join(tmpDir, "later-turn-touched.md");
-    const touchedFilesByTurn = new Map<string, number[]>([
-      ["packages/app-api/src/lib/clickhouseReader.ts", [1, 5]],
-      ["containers/prometheus/prometheus.yml", [14, 19]],
+    const touchedFilesByTurn = new Map<string, TurnTouchEntry[]>([
+      ["packages/app-api/src/lib/clickhouseReader.ts", [{ turn: 1, sha: "abc1234" }, { turn: 5, sha: "def5678" }]],
+      ["containers/prometheus/prometheus.yml", [{ turn: 14, sha: "aaa0001" }, { turn: 19, sha: "bbb0002" }]],
     ]);
 
     const content = await generateLaterTurnPrompt({
@@ -184,9 +185,9 @@ describe("generateLaterTurnPrompt", () => {
     });
 
     expect(content).toContain("Earlier Turns of This Run Touched");
-    expect(content).toContain("packages/app-api/src/lib/clickhouseReader.ts — turns 1, 5");
-    expect(content).toContain("containers/prometheus/prometheus.yml — turns 14, 19");
-    expect(content).toContain("do not assume it is pre-existing", "touched-files block should say 'do not assume it is pre-existing'");
+    expect(content).toContain("packages/app-api/src/lib/clickhouseReader.ts — turns 1 (abc1234), 5 (def5678)");
+    expect(content).toContain("containers/prometheus/prometheus.yml — turns 14 (aaa0001), 19 (bbb0002)");
+    expect(content).toContain("do not assume it is pre-existing");
   });
 
   test("does NOT include touched-files block when map is empty", async () => {
@@ -222,8 +223,8 @@ describe("generateLaterTurnPrompt", () => {
 
   test("touched-files block appears before Current Findings section", async () => {
     const outputPath = join(tmpDir, "later-turn-order.md");
-    const touchedFilesByTurn = new Map<string, number[]>([
-      ["src/foo.ts", [1]],
+    const touchedFilesByTurn = new Map<string, TurnTouchEntry[]>([
+      ["src/foo.ts", [{ turn: 1, sha: "abc1234" }]],
     ]);
 
     const content = await generateLaterTurnPrompt({
@@ -246,24 +247,24 @@ describe("generateLaterTurnPrompt", () => {
 });
 
 describe("renderTouchedFilesBlock", () => {
-  test("returns empty string for empty map", () => {
+  test("returns empty string for empty map with no commit failures", () => {
     const result = renderTouchedFilesBlock(new Map());
     expect(result).toBe("");
   });
 
-  test("renders single file correctly", () => {
-    const result = renderTouchedFilesBlock(new Map([
-      ["src/foo.ts", [3]],
+  test("renders single file correctly with SHA", () => {
+    const result = renderTouchedFilesBlock(new Map<string, TurnTouchEntry[]>([
+      ["src/foo.ts", [{ turn: 3, sha: "abc1234" }]],
     ]));
     expect(result).toContain("Earlier Turns of This Run Touched");
-    expect(result).toContain("src/foo.ts — turns 3");
+    expect(result).toContain("src/foo.ts — turns 3 (abc1234)");
   });
 
   test("renders multiple files sorted alphabetically", () => {
-    const result = renderTouchedFilesBlock(new Map([
-      ["z-last.ts", [2]],
-      ["a-first.ts", [1]],
-      ["m-middle.ts", [3]],
+    const result = renderTouchedFilesBlock(new Map<string, TurnTouchEntry[]>([
+      ["z-last.ts", [{ turn: 2, sha: "aaa" }]],
+      ["a-first.ts", [{ turn: 1, sha: "bbb" }]],
+      ["m-middle.ts", [{ turn: 3, sha: "ccc" }]],
     ]));
     const aIdx = result.indexOf("a-first.ts");
     const mIdx = result.indexOf("m-middle.ts");
@@ -272,19 +273,66 @@ describe("renderTouchedFilesBlock", () => {
     expect(mIdx).toBeLessThan(zIdx);
   });
 
-  test("renders multiple turns for a single file", () => {
-    const result = renderTouchedFilesBlock(new Map([
-      ["src/bar.ts", [1, 3, 7]],
+  test("renders multiple turns for a single file with SHAs", () => {
+    const result = renderTouchedFilesBlock(new Map<string, TurnTouchEntry[]>([
+      ["src/bar.ts", [{ turn: 1, sha: "aaa0001" }, { turn: 3, sha: "bbb0002" }, { turn: 7, sha: "ccc0003" }]],
     ]));
-    expect(result).toContain("src/bar.ts — turns 1, 3, 7");
+    expect(result).toContain("src/bar.ts — turns 1 (aaa0001), 3 (bbb0002), 7 (ccc0003)");
   });
 
-  test("includes git inspection hint", () => {
-    const result = renderTouchedFilesBlock(new Map([
-      ["src/baz.ts", [2]],
+  test("render preserves input order — sorting happens upstream in computeTouchedFilesByTurn", () => {
+    // The renderer does NOT sort turns within a file's entry list — it preserves
+    // whatever order was passed in. Sorting is the responsibility of computeTouchedFilesByTurn.
+    const result = renderTouchedFilesBlock(new Map<string, TurnTouchEntry[]>([
+      ["src/sorted.ts", [{ turn: 7, sha: "ccc" }, { turn: 1, sha: "aaa" }, { turn: 3, sha: "bbb" }]],
     ]));
-    expect(result).toContain("git log");
+    expect(result).toContain("src/sorted.ts — turns 7 (ccc), 1 (aaa), 3 (bbb)");
+    // Entries appear in the exact input order, confirming no re-sorting in the renderer.
+  });
+
+  test("includes git inspection hint using git show and git log --follow", () => {
+    const result = renderTouchedFilesBlock(new Map<string, TurnTouchEntry[]>([
+      ["src/baz.ts", [{ turn: 2, sha: "abc" }]],
+    ]));
     expect(result).toContain("git show");
+    expect(result).toContain("git log --follow");
+  });
+
+  test("renders commit-failure note when commitFailureTurns provided", () => {
+    const result = renderTouchedFilesBlock(new Map(), [2, 4]);
+    expect(result).toContain("Turn(s) 2, 4 have uncommitted edits");
+    expect(result).toContain("git status");
+  });
+
+  test("renders both files and commit-failure note together", () => {
+    const result = renderTouchedFilesBlock(
+      new Map<string, TurnTouchEntry[]>([["src/foo.ts", [{ turn: 1, sha: "abc" }]]]),
+      [3]
+    );
+    expect(result).toContain("Earlier Turns of This Run Touched");
+    expect(result).toContain("src/foo.ts");
+    expect(result).toContain("Turn(s) 3 have uncommitted edits");
+  });
+
+  test("failure note appears AFTER the file list in the combined case", () => {
+    const result = renderTouchedFilesBlock(
+      new Map<string, TurnTouchEntry[]>([["src/foo.ts", [{ turn: 1, sha: "abc" }]]]),
+      [3]
+    );
+    const fileListIdx = result.indexOf("src/foo.ts");
+    const failureNoteIdx = result.indexOf("uncommitted edits");
+    expect(fileListIdx).toBeGreaterThan(-1);
+    expect(failureNoteIdx).toBeGreaterThan(-1);
+    // The failure note must come after the file list entry.
+    expect(failureNoteIdx).toBeGreaterThan(fileListIdx);
+  });
+
+  test("renders summarizer-failure note with correct prose", () => {
+    // summarizer-failure turns are treated the same as commit-failure turns
+    // — they leave uncommitted edits in the working tree.
+    const result = renderTouchedFilesBlock(new Map(), [5]);
+    expect(result).toContain("Turn(s) 5 have uncommitted edits");
+    expect(result).toContain("git status");
   });
 });
 

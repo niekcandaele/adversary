@@ -1,4 +1,5 @@
 import type { VerifyFinding, TurnResult } from "../types/index.js";
+import type { TurnTouchEntry } from "../git/index.js";
 import { formatDuration } from "../utils/slugify.js";
 import { writeText } from "../utils/fs.js";
 import { join } from "node:path";
@@ -150,24 +151,59 @@ ${planContent}
 
 /**
  * Renders the "Earlier Turns of This Run Touched" block for injection into later-turn prompts.
- * Returns an empty string when there are no touched files to report.
+ * Accepts the new Map<string, TurnTouchEntry[]> format that includes SHAs per turn.
+ * Also accepts an optional list of commit-failure turn numbers to surface a note.
+ * Returns an empty string when there are no touched files and no commit-failure turns to report.
+ *
+ * The file-oriented heading and git-inspection paragraph are only emitted when there are
+ * actual files to list. When there are only commit-failure turns (no committed files), a
+ * shorter block is rendered so the heading does not falsely promise file context.
  */
-export function renderTouchedFilesBlock(touchedFilesByTurn: Map<string, number[]>): string {
-  if (touchedFilesByTurn.size === 0) return "";
+export function renderTouchedFilesBlock(
+  touchedFilesByTurn: Map<string, TurnTouchEntry[]>,
+  commitFailureTurns: number[] = []
+): string {
+  const hasFiles = touchedFilesByTurn.size > 0;
+  const hasFailures = commitFailureTurns.length > 0;
+
+  if (!hasFiles && !hasFailures) return "";
+
+  const failureNote = hasFailures
+    ? `> **Note:** Turn(s) ${commitFailureTurns.join(", ")} have uncommitted edits in the working tree from a failed turn. Run \`git status\` to inspect.\n`
+    : "";
+
+  // When there are no committed files to list, emit a minimal block focused only on
+  // the commit-failure note. Avoid the file-oriented heading and git-inspection prose
+  // that would be incoherent without any actual file entries.
+  if (!hasFiles) {
+    return `## Earlier Turns of This Run\n\n${failureNote}\n`;
+  }
 
   const entries = Array.from(touchedFilesByTurn.entries())
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([path, turns]) => `- ${path} — turns ${turns.join(", ")}`)
+    .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+    .map(([path, turns]) => {
+      const turnList = turns.map((e) => `${e.turn} (${e.sha})`).join(", ");
+      return `- ${path} — turns ${turnList}`;
+    })
     .join("\n");
+
+  // Use concrete-looking values in the example (not copy-pasteable templates with
+  // angle-bracket placeholders). The SHAs are listed inline per file; read the actual
+  // SHA from the entry and substitute it in place of the example value.
+  const gitHint = `For each file, use the parenthesised SHA to inspect it, e.g. \`git show abc1234 -- src/foo.ts\`, or trace full history with \`git log --follow -p -- src/foo.ts\`.`;
+
+  // Place the failure note BELOW the file list so it doesn't interrupt the
+  // git-hint → file-list reading flow. The note is supplementary context.
+  const failureSection = hasFailures ? `\n${failureNote}` : "";
 
   return `## Earlier Turns of This Run Touched
 
 These commits exist on the branch (prior turns). If a failure you encounter touches one
-of these files, do not assume it is pre-existing — inspect the relevant turn first with
-\`git log <SHA>..HEAD --stat -- <path>\` or \`git show <SHA> -- <path>\`.
+of these files, do not assume it is pre-existing — inspect the relevant turn first.
+${gitHint}
 
 ${entries}
-
+${failureSection}
 `;
 }
 
@@ -182,10 +218,12 @@ export async function generateLaterTurnPrompt(options: {
   repoGuidance?: string;
   outputPath: string;
   resumeNote?: boolean;
-  /** Map of file path → list of turn numbers that touched it (from prior turn commit SHAs). */
-  touchedFilesByTurn?: Map<string, number[]>;
+  /** Map of file path → list of TurnTouchEntry objects (turn + short SHA) that touched it. */
+  touchedFilesByTurn?: Map<string, TurnTouchEntry[]>;
+  /** Turn numbers that had a commit failure (their edits may be in the working tree). */
+  commitFailureTurns?: number[];
 }): Promise<string> {
-  const { planContent, threshold, turn, maxTurns, branch, thresholdFindings, commitError, repoGuidance = "", outputPath, resumeNote = false, touchedFilesByTurn } = options;
+  const { planContent, threshold, turn, maxTurns, branch, thresholdFindings, commitError, repoGuidance = "", outputPath, resumeNote = false, touchedFilesByTurn, commitFailureTurns = [] } = options;
 
   const resumeNoteMd = resumeNote
     ? `> **Note:** This turn is being resumed after an interruption. Partial work may exist in the working tree. Review the current state before making changes.\n\n`
@@ -211,9 +249,18 @@ export async function generateLaterTurnPrompt(options: {
     ? `\n---\n\n## Repo Guidance\n\n${repoGuidance}\n`
     : "";
 
-  const touchedFilesBlockMd = touchedFilesByTurn && touchedFilesByTurn.size > 0
-    ? renderTouchedFilesBlock(touchedFilesByTurn)
+  const hasTouchedFilesBlock = (touchedFilesByTurn && touchedFilesByTurn.size > 0) || commitFailureTurns.length > 0;
+  const touchedFilesBlockMd = hasTouchedFilesBlock
+    ? renderTouchedFilesBlock(touchedFilesByTurn ?? new Map(), commitFailureTurns)
     : "";
+
+  // The "which files were affected" parenthetical only makes sense when there are
+  // actual file entries in the block. When the block exists only for the commit-failure
+  // note (no committed files), omit the files-oriented cross-reference phrase.
+  const hasFilesInBlock = touchedFilesByTurn != null && touchedFilesByTurn.size > 0;
+  const suspectFailureClause = hasTouchedFilesBlock
+    ? `- **Failures that look unrelated to your current findings are suspect:** earlier turns of this same adversary run may have introduced them. Do not dismiss a failure as "pre-existing" without verifying it on the base branch. If you can't easily verify, treat the failure as yours.${hasFilesInBlock ? ' (See "Earlier Turns of This Run Touched" below for which files were affected.)' : ''}`
+    : `- **Failures that look unrelated to your current findings are suspect:** earlier turns of this same adversary run may have introduced them. Do not dismiss a failure as "pre-existing" without verifying it on the base branch. If you can't easily verify, treat the failure as yours.`;
 
   const content = `# Adversarial Implementation Loop — Turn ${turn} of ${maxTurns}
 
@@ -227,7 +274,7 @@ Your job is to address the verification findings below so that a subsequent veri
 - **Do NOT manage git yourself.** The orchestrator handles all git operations.
 - **Do NOT run the verify skill.** A separate verify step will run after you finish.
 - Do not break existing passing tests while fixing findings.
-- **Failures that look unrelated to your current findings are suspect:** earlier turns of this same adversary run may have introduced them. Do not dismiss a failure as "pre-existing" without verifying it on the base branch or in the run history. If you can't easily verify, treat the failure as yours.
+${suspectFailureClause}
 - **Do not add new test entrypoints** (additional npm scripts, shell scripts, CI runners) to route around friction. Extend the existing test harness. If you genuinely believe a new entrypoint is required, do not add it — surface the proposal in your turn summary so the next verify round can decide.
 
 ## Branch

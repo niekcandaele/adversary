@@ -159,7 +159,7 @@ export async function runLoop(options: {
       } else {
         const lastTurn = priorTurns[priorTurns.length - 1];
         const thresholdFindings = lastTurn?.thresholdFindings ?? [];
-        const touchedFilesByTurn = await computeTouchedFilesByTurn(priorTurns, cwd);
+        const { fileToTurns, commitFailureTurns } = await computeTouchedFilesByTurn(priorTurns, cwd);
         await generateLaterTurnPrompt({
           planContent,
           threshold,
@@ -171,7 +171,8 @@ export async function runLoop(options: {
           repoGuidance,
           outputPath: promptPath,
           resumeNote,
-          touchedFilesByTurn,
+          touchedFilesByTurn: fileToTurns,
+          commitFailureTurns,
         });
       }
     }
