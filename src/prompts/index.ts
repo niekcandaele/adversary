@@ -128,6 +128,7 @@ Your job is to implement the plan below so that a subsequent verification step f
 - **Do NOT manage git yourself.** The orchestrator handles all git operations.
 - **Do NOT run the verify skill.** A separate verify step will run after you finish.
 - Focus on making the implementation complete and production-quality.
+- **Do not add new test entrypoints** (additional npm scripts, shell scripts, CI runners) to route around friction. Extend the existing test harness. If you genuinely believe a new entrypoint is required, do not add it — surface the proposal in your turn summary so the next verify round can decide.
 
 ## Branch
 You are on branch: \`${branch}\`
@@ -147,6 +148,29 @@ ${planContent}
   return content;
 }
 
+/**
+ * Renders the "Earlier Turns of This Run Touched" block for injection into later-turn prompts.
+ * Returns an empty string when there are no touched files to report.
+ */
+export function renderTouchedFilesBlock(touchedFilesByTurn: Map<string, number[]>): string {
+  if (touchedFilesByTurn.size === 0) return "";
+
+  const entries = Array.from(touchedFilesByTurn.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([path, turns]) => `- ${path} — turns ${turns.join(", ")}`)
+    .join("\n");
+
+  return `## Earlier Turns of This Run Touched
+
+These commits exist on the branch (prior turns). If a failure you encounter touches one
+of these files, do not assume it is pre-existing — inspect the relevant turn first with
+\`git log <SHA>..HEAD --stat -- <path>\` or \`git show <SHA> -- <path>\`.
+
+${entries}
+
+`;
+}
+
 export async function generateLaterTurnPrompt(options: {
   planContent: string;
   threshold: number;
@@ -158,8 +182,10 @@ export async function generateLaterTurnPrompt(options: {
   repoGuidance?: string;
   outputPath: string;
   resumeNote?: boolean;
+  /** Map of file path → list of turn numbers that touched it (from prior turn commit SHAs). */
+  touchedFilesByTurn?: Map<string, number[]>;
 }): Promise<string> {
-  const { planContent, threshold, turn, maxTurns, branch, thresholdFindings, commitError, repoGuidance = "", outputPath, resumeNote = false } = options;
+  const { planContent, threshold, turn, maxTurns, branch, thresholdFindings, commitError, repoGuidance = "", outputPath, resumeNote = false, touchedFilesByTurn } = options;
 
   const resumeNoteMd = resumeNote
     ? `> **Note:** This turn is being resumed after an interruption. Partial work may exist in the working tree. Review the current state before making changes.\n\n`
@@ -185,6 +211,10 @@ export async function generateLaterTurnPrompt(options: {
     ? `\n---\n\n## Repo Guidance\n\n${repoGuidance}\n`
     : "";
 
+  const touchedFilesBlockMd = touchedFilesByTurn && touchedFilesByTurn.size > 0
+    ? renderTouchedFilesBlock(touchedFilesByTurn)
+    : "";
+
   const content = `# Adversarial Implementation Loop — Turn ${turn} of ${maxTurns}
 
 ${resumeNoteMd}## Your Role
@@ -197,6 +227,8 @@ Your job is to address the verification findings below so that a subsequent veri
 - **Do NOT manage git yourself.** The orchestrator handles all git operations.
 - **Do NOT run the verify skill.** A separate verify step will run after you finish.
 - Do not break existing passing tests while fixing findings.
+- **Failures that look unrelated to your current findings are suspect:** earlier turns of this same adversary run may have introduced them. Do not dismiss a failure as "pre-existing" without verifying it on the base branch or in the run history. If you can't easily verify, treat the failure as yours.
+- **Do not add new test entrypoints** (additional npm scripts, shell scripts, CI runners) to route around friction. Extend the existing test harness. If you genuinely believe a new entrypoint is required, do not add it — surface the proposal in your turn summary so the next verify round can decide.
 
 ## Branch
 You are on branch: \`${branch}\`
@@ -207,7 +239,7 @@ Threshold: **${threshold}** (you must fix findings with severity >= ${threshold}
 ${repoGuidanceMd}
 ---
 
-## Current Findings to Fix (severity >= ${threshold})
+${touchedFilesBlockMd}## Current Findings to Fix (severity >= ${threshold})
 
 ${commitErrorMd}${findingsMd}
 

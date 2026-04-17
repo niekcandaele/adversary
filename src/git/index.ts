@@ -178,3 +178,46 @@ export async function autoSuffixBranchName(baseName: string, cwd: string): Promi
   }
   throw new GitError(`Cannot find unique branch name for '${baseName}' (tried up to -99).`);
 }
+
+/**
+ * Returns the list of file paths changed by a single commit (using --name-only).
+ * Returns an empty array if the commit SHA is invalid or the command fails.
+ * Handles root (initial) commits that have no parent by using --root flag on diff-tree.
+ */
+export async function getFilesChangedByCommit(sha: string, cwd: string): Promise<string[]> {
+  // Use diff-tree with --root to handle both root commits and normal commits.
+  // --root: treat the commit as a diff against an empty tree (works for root commits).
+  // Without --root, root commits produce empty output since they have no parent.
+  const result = await git(["diff-tree", "--root", "--no-commit-id", "-r", "--name-only", sha], cwd);
+  if (result.exitCode === 0) {
+    return result.stdout.split("\n").filter(Boolean);
+  }
+  return [];
+}
+
+/**
+ * Given a list of TurnResult-like objects (each with an optional commitSha and a turn number),
+ * computes a deduped map of file path → sorted list of turn numbers that touched it.
+ * Turns where commitSha is undefined (commit-failure turns) are skipped.
+ */
+export async function computeTouchedFilesByTurn(
+  turns: Array<{ turn: number; commitSha?: string }>,
+  cwd: string
+): Promise<Map<string, number[]>> {
+  const fileToTurns = new Map<string, number[]>();
+
+  for (const t of turns) {
+    if (!t.commitSha) continue;
+    const files = await getFilesChangedByCommit(t.commitSha, cwd);
+    for (const file of files) {
+      const existing = fileToTurns.get(file);
+      if (existing) {
+        if (!existing.includes(t.turn)) existing.push(t.turn);
+      } else {
+        fileToTurns.set(file, [t.turn]);
+      }
+    }
+  }
+
+  return fileToTurns;
+}

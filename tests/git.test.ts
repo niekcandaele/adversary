@@ -17,6 +17,8 @@ import {
   lsRemoteHasBranch,
   getRemoteBranchSha,
   getStatusShort,
+  getFilesChangedByCommit,
+  computeTouchedFilesByTurn,
 } from "../src/git/index.js";
 
 async function gitInit(dir: string): Promise<void> {
@@ -411,5 +413,143 @@ describe("getStatusShort — ignoreUntracked option (VI-7)", () => {
     } finally {
       await rm(cleanDir, { recursive: true, force: true });
     }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// getFilesChangedByCommit and computeTouchedFilesByTurn
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("getFilesChangedByCommit", () => {
+  let touchedDir: string;
+  let sha1: string;
+  let sha2: string;
+
+  beforeAll(async () => {
+    touchedDir = await mkdtemp(join(tmpdir(), "adversary-touched-"));
+    const run = async (args: string[], cwd: string): Promise<string> => {
+      const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+      await proc.exited;
+      return (await new Response(proc.stdout).text()).trim();
+    };
+
+    await run(["init", "-b", "main"], touchedDir);
+    await run(["config", "user.email", "t@t.com"], touchedDir);
+    await run(["config", "user.name", "T"], touchedDir);
+
+    // Commit 1: add two files
+    await writeFile(join(touchedDir, "alpha.ts"), "export const a = 1;");
+    await writeFile(join(touchedDir, "beta.ts"), "export const b = 2;");
+    await run(["add", "."], touchedDir);
+    await run(["commit", "-m", "first commit"], touchedDir);
+    sha1 = await run(["rev-parse", "HEAD"], touchedDir);
+
+    // Commit 2: add a different file
+    await writeFile(join(touchedDir, "gamma.ts"), "export const c = 3;");
+    await run(["add", "."], touchedDir);
+    await run(["commit", "-m", "second commit"], touchedDir);
+    sha2 = await run(["rev-parse", "HEAD"], touchedDir);
+  });
+
+  afterAll(async () => {
+    await rm(touchedDir, { recursive: true, force: true });
+  });
+
+  test("returns files changed by a commit", async () => {
+    const files = await getFilesChangedByCommit(sha1, touchedDir);
+    expect(files).toContain("alpha.ts");
+    expect(files).toContain("beta.ts");
+    expect(files).not.toContain("gamma.ts");
+  });
+
+  test("returns only the file added in second commit", async () => {
+    const files = await getFilesChangedByCommit(sha2, touchedDir);
+    expect(files).toContain("gamma.ts");
+    expect(files).not.toContain("alpha.ts");
+  });
+
+  test("returns empty array for invalid SHA", async () => {
+    const files = await getFilesChangedByCommit("0000000000000000000000000000000000000000", touchedDir);
+    expect(files).toEqual([]);
+  });
+});
+
+describe("computeTouchedFilesByTurn", () => {
+  let touchedDir2: string;
+  let sha1: string;
+  let sha2: string;
+
+  beforeAll(async () => {
+    touchedDir2 = await mkdtemp(join(tmpdir(), "adversary-touched2-"));
+    const run = async (args: string[], cwd: string): Promise<string> => {
+      const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+      await proc.exited;
+      return (await new Response(proc.stdout).text()).trim();
+    };
+
+    await run(["init", "-b", "main"], touchedDir2);
+    await run(["config", "user.email", "t@t.com"], touchedDir2);
+    await run(["config", "user.name", "T"], touchedDir2);
+
+    // Commit 1: add file-a.ts
+    await writeFile(join(touchedDir2, "file-a.ts"), "a");
+    await run(["add", "."], touchedDir2);
+    await run(["commit", "-m", "turn 1"], touchedDir2);
+    sha1 = await run(["rev-parse", "HEAD"], touchedDir2);
+
+    // Commit 2: add file-b.ts (also touches file-a.ts)
+    await writeFile(join(touchedDir2, "file-a.ts"), "a-modified");
+    await writeFile(join(touchedDir2, "file-b.ts"), "b");
+    await run(["add", "."], touchedDir2);
+    await run(["commit", "-m", "turn 2"], touchedDir2);
+    sha2 = await run(["rev-parse", "HEAD"], touchedDir2);
+  });
+
+  afterAll(async () => {
+    await rm(touchedDir2, { recursive: true, force: true });
+  });
+
+  test("maps files to turn numbers for multiple turns with commitSha", async () => {
+    const result = await computeTouchedFilesByTurn([
+      { turn: 1, commitSha: sha1 },
+      { turn: 2, commitSha: sha2 },
+    ], touchedDir2);
+
+    // file-a.ts touched in turn 1 (added) and turn 2 (modified)
+    const aTurns = result.get("file-a.ts");
+    expect(aTurns).toBeDefined();
+    expect(aTurns).toContain(1);
+    expect(aTurns).toContain(2);
+
+    // file-b.ts touched only in turn 2
+    const bTurns = result.get("file-b.ts");
+    expect(bTurns).toBeDefined();
+    expect(bTurns).toEqual([2]);
+  });
+
+  test("skips turns where commitSha is undefined", async () => {
+    const result = await computeTouchedFilesByTurn([
+      { turn: 1, commitSha: undefined },
+      { turn: 2, commitSha: sha2 },
+    ], touchedDir2);
+
+    // Only turn 2's files should appear
+    const allTurns = new Set(Array.from(result.values()).flat());
+    expect(allTurns.has(1)).toBe(false);
+    expect(allTurns.has(2)).toBe(true);
+  });
+
+  test("returns empty map when all turns have no commitSha", async () => {
+    const result = await computeTouchedFilesByTurn([
+      { turn: 1, commitSha: undefined },
+      { turn: 2, commitSha: undefined },
+    ], touchedDir2);
+
+    expect(result.size).toBe(0);
+  });
+
+  test("returns empty map for empty turns array", async () => {
+    const result = await computeTouchedFilesByTurn([], touchedDir2);
+    expect(result.size).toBe(0);
   });
 });

@@ -7,6 +7,7 @@ import {
   generateLaterTurnPrompt,
   generateFindingsFile,
   generateHistoryFile,
+  renderTouchedFilesBlock,
 } from "../src/prompts/index.js";
 import type { VerifyFinding, TurnResult } from "../src/types/index.js";
 
@@ -49,6 +50,50 @@ describe("generateFirstTurnPrompt", () => {
     const written = await Bun.file(outputPath).text();
     expect(written).toBe(content);
   });
+
+  test("includes Clause 2 (no new test entrypoints) in first-turn prompt", async () => {
+    const outputPath = join(tmpDir, "first-turn-clause2.md");
+    const content = await generateFirstTurnPrompt({
+      planContent: "# Plan",
+      threshold: 5,
+      turn: 1,
+      maxTurns: 3,
+      branch: "adversary/test",
+      outputPath,
+    });
+
+    expect(content).toContain("Do not add new test entrypoints");
+    expect(content).toContain("Extend the existing test harness");
+  });
+
+  test("does NOT include Clause 1 (pre-existing failure warning) in first-turn prompt", async () => {
+    const outputPath = join(tmpDir, "first-turn-no-clause1.md");
+    const content = await generateFirstTurnPrompt({
+      planContent: "# Plan",
+      threshold: 5,
+      turn: 1,
+      maxTurns: 3,
+      branch: "adversary/test",
+      outputPath,
+    });
+
+    // Clause 1 is only for later turns
+    expect(content).not.toContain("Failures that look unrelated to your current findings are suspect");
+  });
+
+  test("does NOT include touched-files block in first-turn prompt", async () => {
+    const outputPath = join(tmpDir, "first-turn-no-touched.md");
+    const content = await generateFirstTurnPrompt({
+      planContent: "# Plan",
+      threshold: 5,
+      turn: 1,
+      maxTurns: 3,
+      branch: "adversary/test",
+      outputPath,
+    });
+
+    expect(content).not.toContain("Earlier Turns of This Run Touched");
+  });
 });
 
 describe("generateLaterTurnPrompt", () => {
@@ -85,6 +130,161 @@ describe("generateLaterTurnPrompt", () => {
     expect(content).toContain("Do NOT manage git");
     expect(content).toContain("Do NOT run the verify");
     expect(content).not.toContain("Run History");
+  });
+
+  test("includes Clause 1 (pre-existing failure warning) in later-turn prompt", async () => {
+    const outputPath = join(tmpDir, "later-turn-clause1.md");
+    const content = await generateLaterTurnPrompt({
+      planContent: "# Plan",
+      threshold: 5,
+      turn: 2,
+      maxTurns: 5,
+      branch: "adversary/test",
+      thresholdFindings: [],
+      outputPath,
+    });
+
+    expect(content).toContain("Failures that look unrelated to your current findings are suspect");
+    expect(content).toContain("Do not dismiss a failure as");
+    expect(content).toContain("treat the failure as yours");
+  });
+
+  test("includes Clause 2 (no new test entrypoints) in later-turn prompt", async () => {
+    const outputPath = join(tmpDir, "later-turn-clause2.md");
+    const content = await generateLaterTurnPrompt({
+      planContent: "# Plan",
+      threshold: 5,
+      turn: 2,
+      maxTurns: 5,
+      branch: "adversary/test",
+      thresholdFindings: [],
+      outputPath,
+    });
+
+    expect(content).toContain("Do not add new test entrypoints");
+    expect(content).toContain("Extend the existing test harness");
+  });
+
+  test("includes touched-files block when touchedFilesByTurn is provided", async () => {
+    const outputPath = join(tmpDir, "later-turn-touched.md");
+    const touchedFilesByTurn = new Map<string, number[]>([
+      ["packages/app-api/src/lib/clickhouseReader.ts", [1, 5]],
+      ["containers/prometheus/prometheus.yml", [14, 19]],
+    ]);
+
+    const content = await generateLaterTurnPrompt({
+      planContent: "# Plan",
+      threshold: 5,
+      turn: 3,
+      maxTurns: 10,
+      branch: "adversary/test",
+      thresholdFindings: [],
+      outputPath,
+      touchedFilesByTurn,
+    });
+
+    expect(content).toContain("Earlier Turns of This Run Touched");
+    expect(content).toContain("packages/app-api/src/lib/clickhouseReader.ts — turns 1, 5");
+    expect(content).toContain("containers/prometheus/prometheus.yml — turns 14, 19");
+    expect(content).toContain("do not assume it is pre-existing", "touched-files block should say 'do not assume it is pre-existing'");
+  });
+
+  test("does NOT include touched-files block when map is empty", async () => {
+    const outputPath = join(tmpDir, "later-turn-no-touched.md");
+    const content = await generateLaterTurnPrompt({
+      planContent: "# Plan",
+      threshold: 5,
+      turn: 2,
+      maxTurns: 5,
+      branch: "adversary/test",
+      thresholdFindings: [],
+      outputPath,
+      touchedFilesByTurn: new Map(),
+    });
+
+    expect(content).not.toContain("Earlier Turns of This Run Touched");
+  });
+
+  test("does NOT include touched-files block when touchedFilesByTurn is omitted", async () => {
+    const outputPath = join(tmpDir, "later-turn-no-touched-omit.md");
+    const content = await generateLaterTurnPrompt({
+      planContent: "# Plan",
+      threshold: 5,
+      turn: 2,
+      maxTurns: 5,
+      branch: "adversary/test",
+      thresholdFindings: [],
+      outputPath,
+    });
+
+    expect(content).not.toContain("Earlier Turns of This Run Touched");
+  });
+
+  test("touched-files block appears before Current Findings section", async () => {
+    const outputPath = join(tmpDir, "later-turn-order.md");
+    const touchedFilesByTurn = new Map<string, number[]>([
+      ["src/foo.ts", [1]],
+    ]);
+
+    const content = await generateLaterTurnPrompt({
+      planContent: "# Plan",
+      threshold: 5,
+      turn: 2,
+      maxTurns: 5,
+      branch: "adversary/test",
+      thresholdFindings: [],
+      outputPath,
+      touchedFilesByTurn,
+    });
+
+    const touchedIdx = content.indexOf("Earlier Turns of This Run Touched");
+    const findingsIdx = content.indexOf("Current Findings to Fix");
+    expect(touchedIdx).toBeGreaterThan(-1);
+    expect(findingsIdx).toBeGreaterThan(-1);
+    expect(touchedIdx).toBeLessThan(findingsIdx);
+  });
+});
+
+describe("renderTouchedFilesBlock", () => {
+  test("returns empty string for empty map", () => {
+    const result = renderTouchedFilesBlock(new Map());
+    expect(result).toBe("");
+  });
+
+  test("renders single file correctly", () => {
+    const result = renderTouchedFilesBlock(new Map([
+      ["src/foo.ts", [3]],
+    ]));
+    expect(result).toContain("Earlier Turns of This Run Touched");
+    expect(result).toContain("src/foo.ts — turns 3");
+  });
+
+  test("renders multiple files sorted alphabetically", () => {
+    const result = renderTouchedFilesBlock(new Map([
+      ["z-last.ts", [2]],
+      ["a-first.ts", [1]],
+      ["m-middle.ts", [3]],
+    ]));
+    const aIdx = result.indexOf("a-first.ts");
+    const mIdx = result.indexOf("m-middle.ts");
+    const zIdx = result.indexOf("z-last.ts");
+    expect(aIdx).toBeLessThan(mIdx);
+    expect(mIdx).toBeLessThan(zIdx);
+  });
+
+  test("renders multiple turns for a single file", () => {
+    const result = renderTouchedFilesBlock(new Map([
+      ["src/bar.ts", [1, 3, 7]],
+    ]));
+    expect(result).toContain("src/bar.ts — turns 1, 3, 7");
+  });
+
+  test("includes git inspection hint", () => {
+    const result = renderTouchedFilesBlock(new Map([
+      ["src/baz.ts", [2]],
+    ]));
+    expect(result).toContain("git log");
+    expect(result).toContain("git show");
   });
 });
 
