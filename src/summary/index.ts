@@ -1,6 +1,7 @@
 import { join, relative, basename } from "node:path";
 import { homedir } from "node:os";
 import type { RunState, VerifyFinding, RunOutcome, PrSummaryOutput } from "../types/index.js";
+import { getOutcomeLabels } from "../types/index.js";
 import { writeText, writeJsonFile } from "../utils/fs.js";
 import { formatDuration } from "../utils/slugify.js";
 
@@ -41,17 +42,8 @@ function findingsMd(findings: VerifyFinding[], heading: string): string {
 }
 
 function outcomeLabel(outcome: RunOutcome | undefined): string {
-  switch (outcome) {
-    case "clean": return "✓ Clean — zero threshold findings";
-    case "capped": return "⚠ Capped — max turns reached with findings remaining";
-    case "implement-failure": return "✗ Stopped — implementer step failed";
-    case "summarizer-failure": return "✗ Stopped — summarizer step failed";
-    case "verify-failure": return "✗ Stopped — verifier step failed";
-    case "verify-error": return "✗ Stopped — verifier returned error status";
-    case "preflight-failure": return "✗ Stopped — preflight check failed";
-    case "commit-failure": return "✗ Stopped — commit step failed";
-    default: return "Unknown outcome";
-  }
+  if (!outcome) return "Unknown outcome";
+  return getOutcomeLabels(outcome).summaryLabel;
 }
 
 export async function generateFinalSummary(state: RunState, threshold: number): Promise<void> {

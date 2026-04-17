@@ -8,7 +8,7 @@ import { mkdtempSync } from "node:fs";
 // the deterministic parts: slug + timestamp combination and auto-suffix logic.
 import { slugify, timestampCompact } from "../src/utils/slugify.js";
 import { autoSuffixBranchName, branchExists, getCurrentBranch } from "../src/git/index.js";
-import { setupBranch } from "../src/branch/index.js";
+import { setupBranch, reattachBranch } from "../src/branch/index.js";
 
 describe("branch name generation", () => {
   test("produces a well-formed branch name from plan slug + timestamp", () => {
@@ -149,5 +149,47 @@ describe("setupBranch — end-to-end in a real git repo", () => {
     // but we verify the returned branch name is always valid
     expect(first).toMatch(/^adversary\/\d{8}-\d{6}-conflict-plan$/);
     expect(await branchExists(first, dir)).toBe(true);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VI-16: reattachBranch
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("reattachBranch", () => {
+  async function makeGitRepoWithBranches(): Promise<string> {
+    const dir = mkdtempSync(join(tmpdir(), "adversary-reattach-test-"));
+    const run = async (args: string[]) => {
+      const proc = Bun.spawn(["git", ...args], { cwd: dir, stdout: "pipe", stderr: "pipe" });
+      await proc.exited;
+    };
+    await run(["init"]);
+    await run(["config", "user.email", "test@test.com"]);
+    await run(["config", "user.name", "Test"]);
+    const proc = Bun.spawn(["sh", "-c", "echo init > README.md && git add -A && git commit -m init"], {
+      cwd: dir,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    await proc.exited;
+    await run(["branch", "-M", "main"]);
+    // Create an existing feature branch
+    await run(["checkout", "-b", "adversary/existing-feature"]);
+    await run(["checkout", "main"]);
+    return dir;
+  }
+
+  test("successfully reattaches to an existing branch", async () => {
+    const dir = await makeGitRepoWithBranches();
+    await reattachBranch(dir, "adversary/existing-feature");
+    const current = await getCurrentBranch(dir);
+    expect(current).toBe("adversary/existing-feature");
+  });
+
+  test("throws when branch does not exist", async () => {
+    const dir = await makeGitRepoWithBranches();
+    await expect(reattachBranch(dir, "adversary/nonexistent-branch")).rejects.toThrow(
+      /does not exist/
+    );
   });
 });

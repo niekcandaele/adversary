@@ -54,6 +54,24 @@ describe("generateFinalSummary", () => {
     }
   });
 
+  // VI-4: push-failure outcome label rendered correctly
+  test("push-failure outcome: final-summary.md contains 'push to remote failed' and JSON has outcome:push-failure", async () => {
+    const tmpDir = await makeTmpDir();
+    try {
+      const state = makeState(tmpDir, { outcome: "push-failure" });
+      await generateFinalSummary(state, 7);
+
+      const md = await Bun.file(join(tmpDir, "final-summary.md")).text();
+      // The outcomeLabel for push-failure should contain the expected text
+      expect(md).toMatch(/push to remote failed/i);
+
+      const json = await Bun.file(join(tmpDir, "final-summary.json")).json();
+      expect(json.outcome).toBe("push-failure");
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   test("JSON has required fields", async () => {
     const tmpDir = await makeTmpDir();
     try {

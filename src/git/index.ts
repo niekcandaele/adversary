@@ -93,13 +93,9 @@ export async function commitAll(message: string, cwd: string): Promise<string> {
 }
 
 export async function pushBranch(branch: string, remote: string, cwd: string): Promise<void> {
-  // Check if remote branch already exists
-  const result = await git(["ls-remote", "--heads", remote, branch], cwd);
-  if (result.exitCode === 0 && result.stdout.length > 0) {
-    throw new GitError(`Remote branch '${branch}' already exists on '${remote}'. Refusing to push.`);
-  }
   await gitOrThrow(["push", "-u", remote, branch], cwd);
 }
+
 
 export async function detectBaseBranch(cwd: string): Promise<string> {
   // Try common branch names
@@ -120,6 +116,58 @@ export async function detectBaseBranch(cwd: string): Promise<string> {
     return head.stdout.replace("refs/remotes/origin/", "");
   }
   throw new GitError("Cannot auto-detect base branch. Please set baseBranch in config or use --base-branch.");
+}
+
+export async function isAncestor(ancestorSha: string, descendantSha: string, cwd: string): Promise<boolean> {
+  const result = await git(["merge-base", "--is-ancestor", ancestorSha, descendantSha], cwd);
+  return result.exitCode === 0;
+}
+
+export async function commitsBetween(fromSha: string, toSha: string, cwd: string): Promise<string[]> {
+  const result = await git(["log", "--format=%H", `${fromSha}..${toSha}`], cwd);
+  if (result.exitCode !== 0) return [];
+  return result.stdout.split("\n").filter(Boolean);
+}
+
+export async function getHeadSha(cwd: string): Promise<string> {
+  return await gitOrThrow(["rev-parse", "HEAD"], cwd);
+}
+
+export async function getMergeBase(branchA: string, branchB: string, cwd: string): Promise<string> {
+  return await gitOrThrow(["merge-base", branchA, branchB], cwd);
+}
+
+export async function lsRemoteHasBranch(branch: string, remote: string, cwd: string): Promise<boolean> {
+  const result = await git(["ls-remote", "--heads", remote, branch], cwd);
+  return result.exitCode === 0 && result.stdout.length > 0;
+}
+
+/**
+ * Returns the SHA of a remote tracking branch, or null if the branch does not exist on the remote.
+ * Uses `git ls-remote --heads <remote> <branch>` which parses the output `<sha>\trefs/heads/<branch>`.
+ */
+export async function getRemoteBranchSha(branch: string, remote: string, cwd: string): Promise<string | null> {
+  const result = await git(["ls-remote", "--heads", remote, branch], cwd);
+  if (result.exitCode !== 0 || !result.stdout) return null;
+  // Output format: "<sha>\trefs/heads/<branch>"
+  const sha = result.stdout.split("\t")[0]?.trim();
+  return sha ?? null;
+}
+
+export async function resetHard(ref: string, cwd: string): Promise<void> {
+  await gitOrThrow(["reset", "--hard", ref], cwd);
+}
+
+export async function cleanForce(cwd: string): Promise<void> {
+  await gitOrThrow(["clean", "-fd"], cwd);
+}
+
+export async function getStatusShort(cwd: string, options?: { ignoreUntracked?: boolean }): Promise<string> {
+  const args = options?.ignoreUntracked
+    ? ["status", "--short", "--untracked-files=no"]
+    : ["status", "--short"];
+  const result = await git(args, cwd);
+  return result.stdout;
 }
 
 export async function autoSuffixBranchName(baseName: string, cwd: string): Promise<string> {

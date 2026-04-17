@@ -14,8 +14,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
-import { runCommand } from "../src/cli/run.js";
+import { runCommand, runPostLoopPhases, PushFailureError } from "../src/cli/run.js";
 import { PrError } from "../src/pr/index.js";
+import type { RunState } from "../src/types/index.js";
+import { writeFileSync as writeFileSyncFS } from "node:fs";
+import { mkdir as mkdirAsync, writeFile as writeFileAsync } from "node:fs/promises";
 
 /**
  * Create a minimal git repo with initial commit and a local bare remote.
@@ -535,5 +538,437 @@ exit 0
 
     const argsFile = Bun.file(prCreateArgsLog);
     expect(await argsFile.exists()).toBe(false);
+  }, 60000);
+
+  // VI-6: runCommand catches PushFailureError → writes done.flag with push-failure outcome, exits 1
+  // Tests the path where push fails (non-existent remote) → PushFailureError → process.exit(1)
+  test("(VI-6) push to non-existent origin → done.flag written with push-failure outcome, process.exit(1)", async () => {
+    const tmpBinDir = mkdtempSync(join(tmpdir(), "adversary-run-vi6-"));
+
+    // Create repo WITHOUT a real origin — add a non-existent remote URL so push fails
+    const repoDir = mkdtempSync(join(tmpdir(), "adversary-vi6-repo-"));
+    const run = async (args: string[], cwd: string): Promise<string> => {
+      const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+      await proc.exited;
+      return (await new Response(proc.stdout).text()).trim();
+    };
+    await run(["init", "-b", "main"], repoDir);
+    await run(["config", "user.email", "t@t.com"], repoDir);
+    await run(["config", "user.name", "T"], repoDir);
+    writeFileSyncFS(join(repoDir, "README.md"), "init");
+    await run(["add", "."], repoDir);
+    await run(["commit", "-m", "init"], repoDir);
+    // Add a remote that points to a non-existent location — git push will fail with GitError
+    await run(["remote", "add", "origin", "/nonexistent/path/to/repo.git"], repoDir);
+
+    const binDir = join(tmpBinDir, "bin");
+    mkdirSync(binDir, { recursive: true });
+
+    // Implement: creates a file change so a commit is made
+    writeScript(tmpBinDir, "fake-impl-vi6.sh",
+      `#!/bin/sh\necho "change $(date +%s%N)" >> ${join(repoDir, "impl-output.txt")}\nexit 0\n`
+    );
+    const summarizerPath = writeScript(tmpBinDir, "fake-summarizer-vi6.sh",
+      `#!/bin/sh\necho '{"title":"T","summary":"S","reviewerGuide":"G","testPlan":"P","issueNumber":null,"commitMessage":"feat: vi6 change"}'\nexit 0\n`
+    );
+    const verifyHarness = writeFakeVerifyHarness(tmpBinDir, "fake-verify-vi6.sh", { findings: [], status: "ok" });
+
+    // gh auth check passes (but push should fail before gh is called)
+    writeScript(binDir, "gh",
+      `#!/bin/sh
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then exit 0; fi
+exit 0
+`
+    );
+    writeScript(binDir, "glab", `#!/bin/sh\nexit 1\n`);
+
+    const fakeEnv: NodeJS.ProcessEnv = { ...process.env, PATH: `${binDir}:${process.env.PATH ?? ""}` };
+
+    const planPath = writePlan(tmpBinDir, "Test VI-6 Push Failure Exit Code");
+    const configPath = writeFakeConfig(tmpBinDir, {
+      implementCommandTemplate: `${join(tmpBinDir, "fake-impl-vi6.sh")} @{promptFile}`,
+      verifyCommandTemplate: `${verifyHarness} @{promptFile}`,
+      summarizerCommandTemplate: `${summarizerPath} @{promptFile}`,
+    });
+
+    // Override process.exit to capture the exit code
+    const originalExit = process.exit;
+    let capturedExitCode: number | undefined;
+    process.exit = ((code?: number) => {
+      capturedExitCode = code;
+      throw new Error(`process.exit(${code})`);
+    }) as never;
+
+    const stderrChunks: string[] = [];
+    const origStderr = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      stderrChunks.push(typeof chunk === "string" ? chunk : "");
+      return true;
+    }) as never;
+
+    try {
+      await runCommand({ plan: planPath, turns: 1, severityThreshold: 7, configFile: configPath, cwd: repoDir, env: fakeEnv });
+    } catch {
+      // process.exit throws in our mock
+    } finally {
+      process.exit = originalExit;
+      process.stderr.write = origStderr;
+    }
+
+    // Should have called process.exit(1)
+    expect(capturedExitCode).toBe(1);
+
+    // done.flag must exist in the run dir with push-failure outcome
+    const { getStateDir } = await import("../src/config/paths.js");
+    const runsDir = join(getStateDir(repoDir), "runs");
+    const { readdirSync } = await import("node:fs");
+    const runDirs = readdirSync(runsDir);
+    expect(runDirs.length).toBeGreaterThan(0);
+    const runDir = join(runsDir, runDirs[0]!);
+    const doneFlagFile = Bun.file(join(runDir, "done.flag"));
+    expect(await doneFlagFile.exists()).toBe(true);
+    const doneFlag = await doneFlagFile.json();
+    expect(doneFlag.outcome).toBe("push-failure");
+  }, 120000);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VI-3: Push-or-skip decision tree in runPostLoopPhases
+// Tests the four branches of push decision logic using a file:// local remote.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("runPostLoopPhases — push decision tree (VI-3)", () => {
+  let xdgStateDir: string;
+  let savedXdgStateHome: string | undefined;
+
+  beforeEach(async () => {
+    xdgStateDir = await mkdtemp(join(tmpdir(), "adversary-push-xdg-"));
+    savedXdgStateHome = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = xdgStateDir;
+  });
+
+  afterEach(async () => {
+    if (savedXdgStateHome === undefined) {
+      delete process.env.XDG_STATE_HOME;
+    } else {
+      process.env.XDG_STATE_HOME = savedXdgStateHome;
+    }
+    await rm(xdgStateDir, { recursive: true, force: true });
+  });
+
+  /**
+   * Create a git repo with a local bare remote (file:// URL as 'origin').
+   * Returns the repo dir and the bare origin dir.
+   */
+  async function makeRepoWithRemote(): Promise<{ repoDir: string; bareDir: string }> {
+    const repoDir = mkdtempSync(join(tmpdir(), "adversary-push-repo-"));
+    const bareDir = `${repoDir}.bare`;
+
+    const run = async (args: string[], cwd: string) => {
+      const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+      await proc.exited;
+    };
+
+    await run(["init", "-b", "main"], repoDir);
+    await run(["config", "user.email", "t@t.com"], repoDir);
+    await run(["config", "user.name", "T"], repoDir);
+    writeFileSyncFS(join(repoDir, "README.md"), "init");
+    await run(["add", "."], repoDir);
+    await run(["commit", "-m", "init"], repoDir);
+
+    // Clone bare as origin
+    const clone = Bun.spawn(["git", "clone", "--bare", repoDir, bareDir], { stdout: "pipe", stderr: "pipe" });
+    await clone.exited;
+    await run(["remote", "add", "origin", bareDir], repoDir);
+
+    return { repoDir, bareDir };
+  }
+
+  async function makeFakePostLoopBin(tmpBinDir: string, opts: {
+    prCreateExitCode?: number;
+    prListOutput?: string;
+  }): Promise<{ binDir: string; pushArgsLog: string; prCreateArgsLog: string; summarizerScriptPath: string }> {
+    const { prCreateExitCode = 0, prListOutput = "[]" } = opts;
+    const binDir = join(tmpBinDir, "bin");
+    await mkdirAsync(binDir, { recursive: true });
+
+    const pushArgsLog = join(tmpBinDir, "push-args.log");
+    const prCreateArgsLog = join(tmpBinDir, "pr-create-args.log");
+
+    // Fake summarizer (for PR body generation)
+    const summarizerScriptPath = writeScript(tmpBinDir, "fake-pr-summarizer.sh",
+      `#!/bin/sh\necho '{ "title": "Test PR", "summary": "- Changes", "reviewerGuide": "Review", "testPlan": "Test", "issueNumber": null, "commitMessage": "feat: changes" }'\nexit 0\n`
+    );
+
+    // Fake gh CLI — handles auth check, pr list (find existing PR), and pr create
+    writeScript(binDir, "gh",
+      `#!/bin/sh
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then exit 0; fi
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then echo '${prListOutput}'; exit 0; fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  printf '%s\\n' "$@" > "${prCreateArgsLog}"
+  echo "https://github.com/owner/repo/pull/42"
+  exit ${prCreateExitCode}
+fi
+exit 0
+`
+    );
+
+    writeScript(binDir, "glab",
+      `#!/bin/sh\necho "glab not expected" >&2\nexit 1\n`
+    );
+
+    return { binDir, pushArgsLog, prCreateArgsLog, summarizerScriptPath };
+  }
+
+  async function makeCleanState(repoDir: string, runDir: string, branch: string): Promise<RunState> {
+    const state: RunState = {
+      runDir,
+      planFile: join(runDir, "plan.txt"),
+      planTitle: "Test Plan",
+      branch,
+      baseBranch: "main",
+      startedAt: new Date().toISOString(),
+      turns: [],
+      outcome: "clean",
+    };
+
+    await mkdirAsync(runDir, { recursive: true });
+    await writeFileAsync(join(runDir, "plan.txt"), "# Test Plan\nDo a thing.");
+    return state;
+  }
+
+  test("(push branch 1) remote SHA == local SHA → skip push", async () => {
+    const tmpBinDir = mkdtempSync(join(tmpdir(), "adversary-push-fakebin-1-"));
+    const { repoDir, bareDir } = await makeRepoWithRemote();
+    const { binDir, prCreateArgsLog, summarizerScriptPath } = await makeFakePostLoopBin(tmpBinDir, { prCreateExitCode: 0 });
+
+    // Create feature branch, make a commit, push it to remote
+    const run = async (args: string[], cwd: string): Promise<string> => {
+      const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+      await proc.exited;
+      return (await new Response(proc.stdout).text()).trim();
+    };
+    await run(["checkout", "-b", "adversary/test-skip-push"], repoDir);
+    writeFileSyncFS(join(repoDir, "feature.txt"), "feature");
+    await run(["add", "."], repoDir);
+    await run(["commit", "-m", "feat: implement"], repoDir);
+    await run(["push", "origin", "adversary/test-skip-push"], repoDir);
+
+    const runDir = join(tmpBinDir, "run");
+    const state = await makeCleanState(repoDir, runDir, "adversary/test-skip-push");
+
+    const fakeEnv: NodeJS.ProcessEnv = { ...process.env, PATH: `${binDir}:${process.env.PATH ?? ""}` };
+    const config = {
+      baseBranch: "main",
+      implementCommandTemplate: "true",
+      verifyCommandTemplate: "true",
+      summarizerCommandTemplate: `${summarizerScriptPath} @{promptFile}`,
+      implementTimeoutMs: 30000, verifyTimeoutMs: 30000, prTimeoutMs: 10000, summarizerTimeoutMs: 10000,
+      browserAutomation: "warn" as const, customVerificationSteps: [], skillOverrides: {},
+      testTimeoutMs: 30000,
+    };
+
+    // Capture stdout to check "skipping push" message
+    const stdoutChunks: string[] = [];
+    const origWrite = process.stdout.write.bind(process.stdout);
+    process.stdout.write = ((chunk: string | Uint8Array) => { stdoutChunks.push(typeof chunk === "string" ? chunk : ""); return true; }) as never;
+
+    try {
+      await runPostLoopPhases(state, { severityThreshold: 7, config, platform: "github", prCli: "gh", cwd: repoDir, env: fakeEnv });
+    } finally {
+      process.stdout.write = origWrite;
+    }
+
+    const stdout = stdoutChunks.join("");
+    expect(stdout).toMatch(/already up-to-date.*skipping push/i);
+    // PR was still created
+    expect(await Bun.file(prCreateArgsLog).exists()).toBe(true);
+  }, 60000);
+
+  test("(push branch 2) remote SHA != local SHA (local ahead) → push", async () => {
+    const tmpBinDir = mkdtempSync(join(tmpdir(), "adversary-push-fakebin-2-"));
+    const { repoDir } = await makeRepoWithRemote();
+    const { binDir, prCreateArgsLog, summarizerScriptPath } = await makeFakePostLoopBin(tmpBinDir, { prCreateExitCode: 0 });
+
+    const run = async (args: string[], cwd: string) => {
+      const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+      await proc.exited;
+    };
+
+    // Create branch, push once, then make another commit (local ahead)
+    await run(["checkout", "-b", "adversary/test-local-ahead"], repoDir);
+    writeFileSyncFS(join(repoDir, "f1.txt"), "v1");
+    await run(["add", "."], repoDir);
+    await run(["commit", "-m", "first"], repoDir);
+    await run(["push", "origin", "adversary/test-local-ahead"], repoDir);
+
+    // Another commit — local is now ahead of remote
+    writeFileSyncFS(join(repoDir, "f2.txt"), "v2");
+    await run(["add", "."], repoDir);
+    await run(["commit", "-m", "second"], repoDir);
+
+    const runDir = join(tmpBinDir, "run");
+    const state = await makeCleanState(repoDir, runDir, "adversary/test-local-ahead");
+
+    const fakeEnv: NodeJS.ProcessEnv = { ...process.env, PATH: `${binDir}:${process.env.PATH ?? ""}` };
+    const config = {
+      baseBranch: "main",
+      implementCommandTemplate: "true",
+      verifyCommandTemplate: "true",
+      summarizerCommandTemplate: `${summarizerScriptPath} @{promptFile}`,
+      implementTimeoutMs: 30000, verifyTimeoutMs: 30000, prTimeoutMs: 10000, summarizerTimeoutMs: 10000,
+      browserAutomation: "warn" as const, customVerificationSteps: [], skillOverrides: {},
+      testTimeoutMs: 30000,
+    };
+
+    const stdoutChunks: string[] = [];
+    const origWrite = process.stdout.write.bind(process.stdout);
+    process.stdout.write = ((chunk: string | Uint8Array) => { stdoutChunks.push(typeof chunk === "string" ? chunk : ""); return true; }) as never;
+
+    try {
+      await runPostLoopPhases(state, { severityThreshold: 7, config, platform: "github", prCli: "gh", cwd: repoDir, env: fakeEnv });
+    } finally {
+      process.stdout.write = origWrite;
+    }
+
+    const stdout = stdoutChunks.join("");
+    // Should push (SHA differs)
+    expect(stdout).toMatch(/pushing|pushed ok/i);
+    expect(await Bun.file(prCreateArgsLog).exists()).toBe(true);
+  }, 60000);
+
+  test("(push branch 4) divergent remote (non-fast-forward) → push-failure outcome, no gh call (VI-5/VI-8)", async () => {
+    const tmpBinDir = mkdtempSync(join(tmpdir(), "adversary-push-fakebin-4-"));
+    const { repoDir, bareDir } = await makeRepoWithRemote();
+    const { binDir, prCreateArgsLog, summarizerScriptPath } = await makeFakePostLoopBin(tmpBinDir, { prCreateExitCode: 0 });
+
+    const run = async (args: string[], cwd: string): Promise<string> => {
+      const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+      await proc.exited;
+      return (await new Response(proc.stdout).text()).trim();
+    };
+
+    // Create branch on local and push it
+    await run(["checkout", "-b", "adversary/test-diverge"], repoDir);
+    writeFileSyncFS(join(repoDir, "base.txt"), "base");
+    await run(["add", "."], repoDir);
+    await run(["commit", "-m", "base commit"], repoDir);
+    await run(["push", "origin", "adversary/test-diverge"], repoDir);
+
+    // Clone the bare repo to simulate a conflicting commit on remote
+    const otherCloneDir = `${bareDir}-other`;
+    const cloneProc = Bun.spawn(["git", "clone", bareDir, otherCloneDir], { stdout: "pipe", stderr: "pipe" });
+    await cloneProc.exited;
+
+    // Configure git in the other clone
+    await run(["config", "user.email", "test@test.com"], otherCloneDir);
+    await run(["config", "user.name", "Test"], otherCloneDir);
+
+    // Make a diverging commit on the remote via the other clone
+    await run(["checkout", "adversary/test-diverge"], otherCloneDir);
+    writeFileSyncFS(join(otherCloneDir, "remote-diverge.txt"), "remote only");
+    await run(["add", "."], otherCloneDir);
+    await run(["commit", "-m", "diverging remote commit"], otherCloneDir);
+    await run(["push", "origin", "adversary/test-diverge"], otherCloneDir);
+
+    // Make a local commit that diverges from the remote (same parent, different content)
+    // At this point local and remote both have commits beyond the common ancestor
+    writeFileSyncFS(join(repoDir, "local-diverge.txt"), "local only");
+    await run(["add", "."], repoDir);
+    await run(["commit", "-m", "diverging local commit"], repoDir);
+
+    const runDir = join(tmpBinDir, "run-diverge");
+    const state = await makeCleanState(repoDir, runDir, "adversary/test-diverge");
+
+    const fakeEnv: NodeJS.ProcessEnv = { ...process.env, PATH: `${binDir}:${process.env.PATH ?? ""}` };
+    const config = {
+      baseBranch: "main",
+      implementCommandTemplate: "true",
+      verifyCommandTemplate: "true",
+      summarizerCommandTemplate: `${summarizerScriptPath} @{promptFile}`,
+      implementTimeoutMs: 30000, verifyTimeoutMs: 30000, prTimeoutMs: 10000, summarizerTimeoutMs: 10000,
+      browserAutomation: "warn" as const, customVerificationSteps: [], skillOverrides: {},
+      testTimeoutMs: 30000,
+    };
+
+    const stderrChunks: string[] = [];
+    const origStderr = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      stderrChunks.push(typeof chunk === "string" ? chunk : "");
+      return true;
+    }) as never;
+
+    let thrownError: unknown;
+    try {
+      await runPostLoopPhases(state, { severityThreshold: 7, config, platform: "github", prCli: "gh", cwd: repoDir, env: fakeEnv });
+    } catch (e) {
+      thrownError = e;
+    } finally {
+      process.stderr.write = origStderr;
+      await rm(otherCloneDir, { recursive: true, force: true });
+    }
+
+    const stderr = stderrChunks.join("");
+    // Should have detected divergent push and set push-failure outcome
+    expect(state.outcome).toBe("push-failure");
+    expect(stderr).toMatch(/diverged|Remote branch has diverged/i);
+    // PushFailureError should have been thrown
+    expect(thrownError).toBeDefined();
+    expect(thrownError instanceof PushFailureError).toBe(true);
+    // gh pr create should NOT have been called (push failed)
+    expect(await Bun.file(prCreateArgsLog).exists()).toBe(false);
+
+    // VI-5: final-summary.json must have been written BEFORE PushFailureError was thrown
+    const finalSummaryPath = join(runDir, "final-summary.json");
+    const finalSummaryExists = await Bun.file(finalSummaryPath).exists();
+    expect(finalSummaryExists).toBe(true);
+    const finalSummaryJson = await Bun.file(finalSummaryPath).json();
+    expect(finalSummaryJson.outcome).toBe("push-failure");
+  }, 60000);
+
+  test("(push branch 3) remote branch absent → push as new", async () => {
+    const tmpBinDir = mkdtempSync(join(tmpdir(), "adversary-push-fakebin-3-"));
+    const { repoDir } = await makeRepoWithRemote();
+    const { binDir, prCreateArgsLog, summarizerScriptPath } = await makeFakePostLoopBin(tmpBinDir, { prCreateExitCode: 0 });
+
+    const run = async (args: string[], cwd: string) => {
+      const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+      await proc.exited;
+    };
+
+    // Create local-only branch (never pushed)
+    await run(["checkout", "-b", "adversary/test-new-branch"], repoDir);
+    writeFileSyncFS(join(repoDir, "new.txt"), "new");
+    await run(["add", "."], repoDir);
+    await run(["commit", "-m", "new branch commit"], repoDir);
+
+    const runDir = join(tmpBinDir, "run");
+    const state = await makeCleanState(repoDir, runDir, "adversary/test-new-branch");
+
+    const fakeEnv: NodeJS.ProcessEnv = { ...process.env, PATH: `${binDir}:${process.env.PATH ?? ""}` };
+    const config = {
+      baseBranch: "main",
+      implementCommandTemplate: "true",
+      verifyCommandTemplate: "true",
+      summarizerCommandTemplate: `${summarizerScriptPath} @{promptFile}`,
+      implementTimeoutMs: 30000, verifyTimeoutMs: 30000, prTimeoutMs: 10000, summarizerTimeoutMs: 10000,
+      browserAutomation: "warn" as const, customVerificationSteps: [], skillOverrides: {},
+      testTimeoutMs: 30000,
+    };
+
+    const stdoutChunks: string[] = [];
+    const origWrite = process.stdout.write.bind(process.stdout);
+    process.stdout.write = ((chunk: string | Uint8Array) => { stdoutChunks.push(typeof chunk === "string" ? chunk : ""); return true; }) as never;
+
+    try {
+      await runPostLoopPhases(state, { severityThreshold: 7, config, platform: "github", prCli: "gh", cwd: repoDir, env: fakeEnv });
+    } finally {
+      process.stdout.write = origWrite;
+    }
+
+    const stdout = stdoutChunks.join("");
+    expect(stdout).toMatch(/pushing branch|pushed ok/i);
+    expect(await Bun.file(prCreateArgsLog).exists()).toBe(true);
   }, 60000);
 });
