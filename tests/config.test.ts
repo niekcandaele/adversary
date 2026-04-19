@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir, homedir } from "node:os";
 import { join, basename } from "node:path";
 import { spawnSync } from "node:child_process";
-import { loadConfig } from "../src/config/index.js";
+import { loadConfig, parseConfigLayer } from "../src/config/index.js";
 import { getGlobalConfigPath, getStateDir, clearGitRootCache } from "../src/config/paths.js";
 import { DEFAULT_CONFIG } from "../src/types/index.js";
 
@@ -48,6 +48,7 @@ describe("loadConfig", () => {
     expect(config.testTimeoutMs).toBe(DEFAULT_CONFIG.testTimeoutMs);
     expect(config.prTimeoutMs).toBe(DEFAULT_CONFIG.prTimeoutMs);
     expect(config.summarizerTimeoutMs).toBe(DEFAULT_CONFIG.summarizerTimeoutMs);
+    expect(config.servicesTimeoutMs).toBe(DEFAULT_CONFIG.servicesTimeoutMs);
   });
 
   test("loads config from .adversary.json", async () => {
@@ -582,5 +583,33 @@ describe("new config fields", () => {
     const configPath = join(tmpDir, "adv-overrides-num.json");
     await writeFile(configPath, JSON.stringify({ skillOverrides: 0 }));
     await expect(loadConfig(tmpDir, configPath)).rejects.toThrow();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VI-39: assertPositiveFiniteMs rejects 0, -1, NaN, Infinity for timeoutMs fields
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("assertPositiveFiniteMs rejections (VI-39)", () => {
+  const timeoutField = "testTimeoutMs";
+
+  test("throws for 0 with field name in message", () => {
+    expect(() => parseConfigLayer({ [timeoutField]: 0 })).toThrow(timeoutField);
+  });
+
+  test("throws for -1 with field name in message", () => {
+    expect(() => parseConfigLayer({ [timeoutField]: -1 })).toThrow(timeoutField);
+  });
+
+  test("throws for NaN with field name in message", () => {
+    expect(() => parseConfigLayer({ [timeoutField]: NaN })).toThrow(timeoutField);
+  });
+
+  test("throws for Infinity with field name in message", () => {
+    expect(() => parseConfigLayer({ [timeoutField]: Infinity })).toThrow(timeoutField);
+  });
+
+  test("accepts a positive finite value", () => {
+    expect(() => parseConfigLayer({ [timeoutField]: 60000 })).not.toThrow();
   });
 });

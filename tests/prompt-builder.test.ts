@@ -6,6 +6,7 @@ import {
   buildScopeContext,
   buildScopeMetadata,
   buildDiscoveryContext,
+  buildExerciserDiscoveryContext,
   buildPhase1FindingsSummary,
   buildSkillFindingsJson,
 } from "../src/verify/prompt-builder.js";
@@ -37,6 +38,7 @@ const sampleDiscovery: ToolchainDiscovery = {
   lintCommands: ["bunx eslint src/"],
   typeCheckCommands: ["bunx tsc --noEmit"],
   startCommand: "bun run dev",
+  stopCommand: null,
   browserDeps: ["playwright"],
 };
 
@@ -92,11 +94,58 @@ describe("buildDiscoveryContext", () => {
       lintCommands: [],
       typeCheckCommands: [],
       startCommand: null,
+      stopCommand: null,
       browserDeps: [],
     };
     const json = buildDiscoveryContext(emptyDiscovery);
     const parsed = JSON.parse(json);
     expect(parsed.testCommand).toBeNull();
+  });
+});
+
+describe("buildExerciserDiscoveryContext", () => {
+  test("strips startCommand and stopCommand from fully populated discovery", () => {
+    const discovery: ToolchainDiscovery = {
+      testCommand: "bun test",
+      buildCommand: "bun build",
+      lintCommands: ["bunx eslint src/"],
+      typeCheckCommands: ["bunx tsc --noEmit"],
+      startCommand: "docker compose up -d",
+      stopCommand: "docker compose down",
+      browserDeps: ["playwright"],
+    };
+    const json = buildExerciserDiscoveryContext(discovery);
+    const parsed = JSON.parse(json);
+    // startCommand and stopCommand must not appear — exerciser must not re-start services
+    expect(Object.prototype.hasOwnProperty.call(parsed, "startCommand")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(parsed, "stopCommand")).toBe(false);
+    // All other fields must be preserved unchanged
+    expect(parsed.testCommand).toBe("bun test");
+    expect(parsed.buildCommand).toBe("bun build");
+    expect(parsed.lintCommands).toEqual(["bunx eslint src/"]);
+    expect(parsed.typeCheckCommands).toEqual(["bunx tsc --noEmit"]);
+    expect(parsed.browserDeps).toEqual(["playwright"]);
+  });
+
+  test("strips startCommand and stopCommand even when they are null", () => {
+    const discovery: ToolchainDiscovery = {
+      testCommand: "bun test",
+      buildCommand: null,
+      lintCommands: [],
+      typeCheckCommands: [],
+      startCommand: null,
+      stopCommand: null,
+      browserDeps: [],
+    };
+    const json = buildExerciserDiscoveryContext(discovery);
+    const parsed = JSON.parse(json);
+    // startCommand and stopCommand must be omitted even when null — the exerciser
+    // prompt must never see these keys regardless of their value.
+    expect(Object.prototype.hasOwnProperty.call(parsed, "startCommand")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(parsed, "stopCommand")).toBe(false);
+    // Remaining fields are preserved
+    expect(parsed.testCommand).toBe("bun test");
+    expect(parsed.buildCommand).toBeNull();
   });
 });
 

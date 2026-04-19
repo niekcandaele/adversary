@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { statSync, unlinkSync, readdirSync } from "node:fs";
 import type { AdversaryConfig, ToolchainDiscovery, VerifyScope } from "../types/index.js";
 import { runStep } from "../runner/index.js";
 import { writeText, writeJsonFile, readJsonFile, fileExists, ensureDir } from "../utils/fs.js";
@@ -11,8 +12,78 @@ import { extractJson } from "../utils/json.js";
 export { extractJson } from "../utils/json.js";
 
 const DISCOVERY_CACHE_FILE = "discovery.json";
+const DISCOVERY_CONFIG_HASH_FILE = "discovery.config-hash.txt";
 const PROJECT_SKILLS_CACHE_FILE = "projectSkills.txt";
 const REPO_GUIDANCE_CACHE_FILE = "repoGuidance.txt";
+
+/**
+ * The set of toolchain config file names whose modification triggers a discovery cache
+ * invalidation. Matched by basename anywhere in the project tree up to MAX_HASH_DEPTH.
+ * If any of these files change between turns (by mtime), the cached discovery.json is
+ * removed and discovery re-runs so startCommand/stopCommand/testCommand stay current.
+ */
+const TOOLCHAIN_CONFIG_FILES = new Set([
+  "package.json",
+  "pyproject.toml",
+  "Cargo.toml",
+  "go.mod",
+  "Makefile",
+  "Dockerfile",
+  "docker-compose.yml",
+  "docker-compose.yaml",
+]);
+
+/** Maximum directory depth to recurse when walking for toolchain config files. */
+const MAX_HASH_DEPTH = 5;
+
+/** Directories to skip when walking the project tree. */
+const SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", ".next", "__pycache__", "target"]);
+
+/**
+ * Walk the directory tree up to maxDepth and collect {relativePath, mtimeMs} for
+ * every file whose basename appears in TOOLCHAIN_CONFIG_FILES.
+ */
+function walkToolchainFiles(dir: string, cwd: string, depth: number, results: Array<{ relPath: string; mtimeMs: number }>): void {
+  if (depth > MAX_HASH_DEPTH) return;
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (entry.isDirectory()) {
+      if (!SKIP_DIRS.has(entry.name)) {
+        walkToolchainFiles(join(dir, entry.name), cwd, depth + 1, results);
+      }
+    } else if (entry.isFile() && TOOLCHAIN_CONFIG_FILES.has(entry.name)) {
+      const fullPath = join(dir, entry.name);
+      try {
+        const st = statSync(fullPath);
+        // Use a path relative to cwd for stable ordering across machines
+        const relPath = fullPath.startsWith(cwd) ? fullPath.slice(cwd.length + 1) : fullPath;
+        results.push({ relPath, mtimeMs: st.mtimeMs });
+      } catch {
+        // file disappeared between readdir and stat — skip
+      }
+    }
+  }
+}
+
+/**
+ * Compute a lightweight hash of toolchain config file mtimes.
+ * Walks up to MAX_HASH_DEPTH levels of the project tree so monorepo files
+ * like packages/foo/package.json are also tracked.
+ * Returns a stable string that changes if any watched file is added, removed, or modified.
+ */
+export function computeToolchainConfigHash(cwd: string): string {
+  const results: Array<{ relPath: string; mtimeMs: number }> = [];
+  walkToolchainFiles(cwd, cwd, 0, results);
+  // Sort by path so the hash is deterministic regardless of filesystem ordering
+  results.sort((a, b) => a.relPath.localeCompare(b.relPath));
+  if (results.length === 0) return "empty";
+  return results.map((r) => `${r.relPath}:${r.mtimeMs}`).join("|");
+}
 
 /**
  * Run toolchain discovery. Cached after turn 1 using {runDir}/discovery.json.
@@ -31,14 +102,34 @@ export async function runDiscovery(options: {
 
   await cacheRepoGuidance(cwd, runDir);
 
-  // Check cache — both discovery and projectSkills are written together.
-  // Known limitation: there is no cache invalidation mechanism. If the project's
-  // toolchain changes mid-run (e.g. new dependencies installed, package.json updated),
-  // the cached discovery from turn 1 will be used for all subsequent turns.
-  // To force re-discovery, delete {runDir}/discovery.json manually.
+  // Cache invalidation: hash the mtime of watched toolchain config files.
+  // If any watched file changed since the last discovery run, remove the cached
+  // discovery.json to force a fresh discovery this turn.
+  // If the hash file is absent (e.g. existing run from before hashing was added),
+  // treat the cache as valid so we don't disrupt ongoing runs.
   const cachePath = join(runDir, DISCOVERY_CACHE_FILE);
+  const configHashPath = join(runDir, DISCOVERY_CONFIG_HASH_FILE);
+  const currentHash = computeToolchainConfigHash(cwd);
   if (fileExists(cachePath)) {
-    return await readJsonFile<ToolchainDiscovery>(cachePath);
+    if (!fileExists(configHashPath)) {
+      // No hash file yet — first time with hash tracking. Accept the cache and
+      // write the current hash so the next turn can detect changes.
+      await writeText(configHashPath, currentHash);
+      return await readJsonFile<ToolchainDiscovery>(cachePath);
+    }
+    let cachedHash = "";
+    try {
+      cachedHash = (await Bun.file(configHashPath).text()).trim();
+    } catch { /* ignore */ }
+    if (cachedHash === currentHash) {
+      // Toolchain config files unchanged — use the cached discovery
+      return await readJsonFile<ToolchainDiscovery>(cachePath);
+    }
+    process.stdout.write(
+      `  [discovery] Toolchain config files changed since last discovery — re-running discovery\n`
+    );
+    // Remove stale cache; re-run discovery below
+    try { unlinkSync(cachePath); } catch { /* ignore */ }
   }
 
   // Generate project structure snapshot
@@ -95,6 +186,7 @@ export async function runDiscovery(options: {
       lintCommands: [],
       typeCheckCommands: [],
       startCommand: null,
+      stopCommand: null,
       browserDeps: [],
     };
   }
@@ -105,6 +197,8 @@ export async function runDiscovery(options: {
   // Only cache successful discovery — don't poison the cache with empty fallbacks
   if (parsedSuccessfully) {
     await writeJsonFile(cachePath, discovery);
+    // Persist the toolchain config hash so the next turn can detect changes
+    await writeText(configHashPath, currentHash);
   }
 
   return discovery;
@@ -119,6 +213,7 @@ export function normalizeDiscovery(raw: unknown): ToolchainDiscovery {
       lintCommands: [],
       typeCheckCommands: [],
       startCommand: null,
+      stopCommand: null,
       browserDeps: [],
     };
   }
@@ -133,6 +228,7 @@ export function normalizeDiscovery(raw: unknown): ToolchainDiscovery {
       ? d.typeCheckCommands.filter((x): x is string => typeof x === "string")
       : [],
     startCommand: typeof d.startCommand === "string" ? d.startCommand : null,
+    stopCommand: typeof d.stopCommand === "string" ? d.stopCommand : null,
     browserDeps: Array.isArray(d.browserDeps)
       ? d.browserDeps.filter((x): x is string => typeof x === "string")
       : [],
@@ -146,9 +242,12 @@ const MAX_CONFIG_FILE_BYTES = 10 * 1024; // 10KB
 async function gatherProjectStructure(cwd: string): Promise<string> {
   const sections: string[] = [];
 
-  // Directory listing — cap at MAX_FILE_ENTRIES lines to bound prompt size
+  // Directory listing — cap at MAX_FILE_ENTRIES lines to bound prompt size.
+  // maxdepth=5 matches MAX_HASH_DEPTH so the discovery prompt sees the same files
+  // the cache-invalidation hash watches. Without this alignment, monorepo LLMs can't
+  // write correct startCommand for packages nested deeper than depth 3.
   const lsProc = Bun.spawn(
-    ["find", ".", "-maxdepth", "3", "-type", "f", "-not", "-path", "*/node_modules/*", "-not", "-path", "*/.git/*"],
+    ["find", ".", "-maxdepth", "5", "-type", "f", "-not", "-path", "*/node_modules/*", "-not", "-path", "*/.git/*"],
     { cwd, stdout: "pipe", stderr: "pipe" }
   );
   const lsExitCode = await lsProc.exited;

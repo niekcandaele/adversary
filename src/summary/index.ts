@@ -133,7 +133,7 @@ Run artifacts are stored at: \`${state.runDir}\`
 /**
  * Assemble a rich PR body by stitching LLM-generated sections with deterministic metadata.
  */
-export function assemblePrBody(state: RunState, threshold: number, llm: PrSummaryOutput, cwd: string = process.cwd()): string {
+export function assemblePrBody(state: RunState, threshold: number, llm: PrSummaryOutput, cwd: string = process.cwd(), isFailure: boolean = false): string {
   const allThreshold: VerifyFinding[] = [];
   const allBelow: VerifyFinding[] = [];
   const lastTurn = state.turns.length > 0 ? state.turns[state.turns.length - 1] : undefined;
@@ -158,7 +158,11 @@ export function assemblePrBody(state: RunState, threshold: number, llm: PrSummar
           .map((f) => `- **${f.title}** (severity ${f.severity}): ${f.description}`)
           .join("\n");
 
-  return `> ⚠️ This PR was created automatically by the adversary orchestrator. Do not merge without human review.
+  const failureBanner = isFailure
+    ? `> Adversary stopped early: **${outcomeLabel(state.outcome)}**. Review findings below before merging.\n\n`
+    : "";
+
+  return `${failureBanner}> ⚠️ This PR was created automatically by the adversary orchestrator. Do not merge without human review.
 
 ## Summary
 ${issueLink}

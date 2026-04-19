@@ -7,6 +7,12 @@ import { getGlobalConfigPath, resolveGitRoot } from "./paths.js";
 const CONFIG_FILENAME = ".adversary.json";
 const LEGACY_CONFIG_FILENAME = ".pi-adversary.json";
 
+function assertPositiveFiniteMs(value: number, fieldName: string): void {
+  if (!isFinite(value) || value <= 0) {
+    throw new Error(`${fieldName} must be a positive finite integer (got ${value})`);
+  }
+}
+
 export function parseConfigLayer(raw: Record<string, unknown>): Partial<AdversaryConfig> {
   const layer: Partial<AdversaryConfig> = {};
   if (typeof raw.baseBranch === "string") layer.baseBranch = raw.baseBranch;
@@ -16,13 +22,30 @@ export function parseConfigLayer(raw: Record<string, unknown>): Partial<Adversar
     layer.verifyCommandTemplate = raw.verifyCommandTemplate;
   if (typeof raw.summarizerCommandTemplate === "string")
     layer.summarizerCommandTemplate = raw.summarizerCommandTemplate;
-  if (typeof raw.implementTimeoutMs === "number")
+  if (typeof raw.implementTimeoutMs === "number") {
+    assertPositiveFiniteMs(raw.implementTimeoutMs, "implementTimeoutMs");
     layer.implementTimeoutMs = raw.implementTimeoutMs;
-  if (typeof raw.verifyTimeoutMs === "number") layer.verifyTimeoutMs = raw.verifyTimeoutMs;
-  if (typeof raw.testTimeoutMs === "number") layer.testTimeoutMs = raw.testTimeoutMs;
-  if (typeof raw.prTimeoutMs === "number") layer.prTimeoutMs = raw.prTimeoutMs;
-  if (typeof raw.summarizerTimeoutMs === "number")
+  }
+  if (typeof raw.verifyTimeoutMs === "number") {
+    assertPositiveFiniteMs(raw.verifyTimeoutMs, "verifyTimeoutMs");
+    layer.verifyTimeoutMs = raw.verifyTimeoutMs;
+  }
+  if (typeof raw.testTimeoutMs === "number") {
+    assertPositiveFiniteMs(raw.testTimeoutMs, "testTimeoutMs");
+    layer.testTimeoutMs = raw.testTimeoutMs;
+  }
+  if (typeof raw.prTimeoutMs === "number") {
+    assertPositiveFiniteMs(raw.prTimeoutMs, "prTimeoutMs");
+    layer.prTimeoutMs = raw.prTimeoutMs;
+  }
+  if (typeof raw.summarizerTimeoutMs === "number") {
+    assertPositiveFiniteMs(raw.summarizerTimeoutMs, "summarizerTimeoutMs");
     layer.summarizerTimeoutMs = raw.summarizerTimeoutMs;
+  }
+  if (typeof raw.servicesTimeoutMs === "number") {
+    assertPositiveFiniteMs(raw.servicesTimeoutMs, "servicesTimeoutMs");
+    layer.servicesTimeoutMs = raw.servicesTimeoutMs;
+  }
 
   // browserAutomation
   if (raw.browserAutomation !== undefined) {

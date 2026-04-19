@@ -1,5 +1,6 @@
 import { resolve, basename, join } from "node:path";
 import type { RunOptions, RunState, SavedRunConfig, AdversaryConfig } from "../types/index.js";
+import { getOutcomeLabels } from "../types/index.js";
 import { runPreflight } from "../preflight/index.js";
 import type { Platform } from "../preflight/index.js";
 import { setupBranch } from "../branch/index.js";
@@ -8,7 +9,7 @@ import { buildRunDir, initRunDir, saveRunConfig, snapshotPlan, writeDoneFlag, ru
 import { runLoop } from "../loop/index.js";
 import { generateFinalSummary, assemblePrBody } from "../summary/index.js";
 import { generatePrSummary } from "../summarizer/index.js";
-import { pushBranch, getRemoteBranchSha, getHeadSha, isAncestor, GitError } from "../git/index.js";
+import { pushBranch, getRemoteBranchSha, getHeadSha, isAncestor, hasCommitsAheadOfBase, GitError } from "../git/index.js";
 import { createPr, findExistingPr, PrError } from "../pr/index.js";
 import { extractPlanTitle, slugify } from "../utils/slugify.js";
 import { writeText, fileExists } from "../utils/fs.js";
@@ -35,14 +36,17 @@ export function validateRunOptions(options: RunOptions): void {
 }
 
 export function isFailureOutcome(outcome: string | undefined): boolean {
-  return (
-    outcome === "commit-failure" ||
-    outcome === "implement-failure" ||
-    outcome === "summarizer-failure" ||
-    outcome === "verify-failure" ||
-    outcome === "verify-error" ||
-    outcome === "push-failure"
-  );
+  if (!outcome) return false;
+  // Derive from the compile-enforced `kind` field on the outcome labels map.
+  // Adding a new RunOutcome forces a `kind` value in getOutcomeLabels
+  // (via `satisfies`), so completeness is checked at compile time rather than
+  // relying on string-glyph prefix matching.
+  try {
+    const labels = getOutcomeLabels(outcome as import("../types/index.js").RunOutcome);
+    return labels.kind === "failure";
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -70,10 +74,18 @@ export async function runPostLoopPhases(
   process.stdout.write(`  Turns completed: ${state.turns.length}\n`);
 
   if (isFailureOutcome(state.outcome)) {
+    // Even on failure, open a draft PR if the branch has commits — the human
+    // needs something to review. Only skip if there is nothing to push.
+    const branchHasCommits = await hasCommitsAheadOfBase(cwd, state.branch, state.baseBranch);
+    if (!branchHasCommits) {
+      process.stdout.write(
+        `\n[Push] Skipping push/PR — run ended with failure outcome (${state.outcome}) and branch has no commits ahead of base\n`
+      );
+      return;
+    }
     process.stdout.write(
-      `\n[Push] Skipping push/PR — run ended with failure outcome: ${state.outcome}\n`
+      `\n[Push] Run ended with failure outcome (${state.outcome}) but branch has commits — proceeding to create draft PR for human review\n`
     );
-    return;
   }
 
   // Generate PR body (skip if already exists)
@@ -115,7 +127,7 @@ export async function runPostLoopPhases(
         prTitle = rawTitle;
       }
 
-      prBody = assemblePrBody(state, severityThreshold, prSummary, cwd);
+      prBody = assemblePrBody(state, severityThreshold, prSummary, cwd, isFailureOutcome(state.outcome));
       await writeText(prBodyPath, prBody);
       // Persist the title alongside the body so resume can recover it (VI-6)
       await writeText(prTitlePath, prTitle);

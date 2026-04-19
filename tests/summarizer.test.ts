@@ -204,6 +204,7 @@ function makeConfig(summarizerScript: string): AdversaryConfig {
     testTimeoutMs: 30000,
     prTimeoutMs: 10000,
     summarizerTimeoutMs: 10000,
+    servicesTimeoutMs: 10000,
     browserAutomation: "warn",
     customVerificationSteps: [],
     skillOverrides: {},

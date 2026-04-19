@@ -22,7 +22,8 @@ Analyze the project structure and configuration files provided below, then retur
 - `buildCommand`: The command to build/compile the project (e.g., "bun build", "tsc", "cargo build")
 - `lintCommands`: Array of linting commands (e.g., ["npx eslint src/", "ruff check ."])
 - `typeCheckCommands`: Array of type checking commands (e.g., ["npx tsc --noEmit", "mypy src/"])
-- `startCommand`: The command to start the application (e.g., "bun run dev", "npm start")
+- `startCommand`: The command to start required background services before testing. **CRITICAL: this command MUST self-detach/background immediately and return exit 0.** Use patterns like `docker compose up -d`, `tmux new-session -d -s svc 'npm run dev'`, or `nohup bun run dev &`. NEVER set a long-running foreground command (e.g., `docker compose up` without `-d`, or a raw `npm run dev`) — it will hang until the services timeout (default 5 minutes), blocking the entire turn. Set to `null` if no services are required.
+- `stopCommand`: The matching command to stop/tear down whatever `startCommand` started (e.g., `docker compose down`). This runs after each turn for cleanup, even if the turn failed. Set `stopCommand` to `null` ONLY when `startCommand` is `null`, OR when `startCommand` is a pattern like `cmd & disown` / `nohup cmd & disown` where the backgrounded process will be collected by the kernel on exit. For `tmux new-session -d`, `screen -d -m`, `docker compose up -d`, or any process-manager-style start, ALWAYS provide an explicit `stopCommand` (e.g., `tmux kill-session -t svc`, `docker compose down`). Example: if `startCommand` is `docker compose up -d`, then `stopCommand` is `docker compose down`.
 - `browserDeps`: Array of browser automation libraries found (e.g., ["playwright", "puppeteer"])
 
 Set a field to `null` (or empty array for arrays) if not applicable or not found.
@@ -36,5 +37,6 @@ Return ONLY a JSON object with this exact schema:
   "lintCommands": ["array of strings"],
   "typeCheckCommands": ["array of strings"],
   "startCommand": "string or null",
+  "stopCommand": "string or null",
   "browserDeps": ["array of strings"]
 }

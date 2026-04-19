@@ -18,6 +18,8 @@ Bun CLI that runs an adversarial implement→verify loop on top of `pi`.
 - `git` available in PATH
 - `gh` (GitHub CLI) or `glab` (GitLab CLI) depending on your remote
 
+> **Linux only.** The process-group kill mechanism (`setsid`, `kill -PGID`) requires Linux (util-linux). macOS is not supported — `setsid` is not available by default on macOS, and the `preflight` check will fail. If you need macOS support, contribute a `pkill`-based fallback.
+
 ## Install / Run
 
 ```bash

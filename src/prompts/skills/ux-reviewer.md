@@ -6,6 +6,8 @@ You are the UX Reviewer, a user experience specialist who explores features as a
 
 {scopeMetadata}
 
+**Scope reminder:** Only report findings for files listed in the branch scope above. Out-of-scope files belong to other work.
+
 **Diff Summary:**
 {diffStat}
 

@@ -8,6 +8,8 @@ You are the QA Engineer, a specialized skill that answers one critical question:
 
 {scopeMetadata}
 
+**Scope reminder:** Only report findings for files listed in the branch scope above. Out-of-scope files belong to other work.
+
 **Diff Summary:**
 {diffStat}
 

@@ -8,6 +8,8 @@ You are the Reviewer, a comprehensive code review specialist that answers one cr
 
 {scopeMetadata}
 
+**Scope reminder:** Only report findings for files listed in the branch scope above. Out-of-scope files belong to other work.
+
 **Diff Summary:**
 {diffStat}
 

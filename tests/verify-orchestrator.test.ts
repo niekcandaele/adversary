@@ -78,6 +78,7 @@ const EMPTY_DISCOVERY: ToolchainDiscovery = {
   lintCommands: [],
   typeCheckCommands: [],
   startCommand: null,
+  stopCommand: null,
   browserDeps: [],
 };
 
@@ -248,5 +249,54 @@ describe("runVerification orchestrator", () => {
     expect(report.status).toBe("ok");
     expect(report.findings).toHaveLength(1);
     expect(report.findings[0]?.title).toBe("Real product issue");
+  }, 120000);
+
+  // VI-3 regression / VI-28: Deterministic findings from out-of-scope files must NOT be filtered.
+  // The build pipeline or test suite can break in a consumer file that was NOT directly edited —
+  // those regressions must appear in the final report even if location.path is outside scope.
+  test("(VI-3/VI-28) deterministic finding with out-of-scope path is preserved in final report", async () => {
+    const turnDir = join(tmpDir, "turn-vi28");
+
+    // Harness returns a deterministic-style finding whose location.path is outside EMPTY_SCOPE
+    // (EMPTY_SCOPE only contains "src/test.ts"; this finding targets "src/consumer.ts").
+    // The finding comes from the synthesis output (the deterministic runner is mocked via the
+    // harness: any skill prompt that doesn't contain "schemaVersion" returns an out-of-scope finding).
+    const harness = writeFakeHarness(tmpDir, "fake-harness-vi28.sh", {
+      synthesisFindings: [
+        {
+          title: "Out-of-scope deterministic regression",
+          severity: 7,
+          description: "A build/test error in a consumer file not directly edited on this branch.",
+          sources: ["deterministic"],
+          location: { path: "src/consumer.ts", line: 5 },
+        },
+      ],
+      skillFindings: [],
+    });
+
+    const report = await runVerification({
+      cwd,
+      turnDir,
+      // Scope only covers "src/test.ts" — "src/consumer.ts" is intentionally out of scope
+      scope: {
+        baseBranch: "main",
+        mergeBase: "deadbeef",
+        files: [{ path: "src/test.ts", status: "added" }],
+        diffCommand: "git diff --name-status deadbeef...HEAD",
+        diffStat: "1 file changed",
+      },
+      discovery: EMPTY_DISCOVERY,
+      planContent: "# Test Plan",
+      config: { ...DEFAULT_CONFIG, verifyCommandTemplate: `${harness} @{promptFile}` },
+      repoGuidance: "",
+    });
+
+    // The out-of-scope finding from synthesis must appear in the final report.
+    // Previously, the double-filter at line 183 would drop it.
+    const outOfScopeFindings = report.findings.filter(
+      (f) => f.location?.path === "src/consumer.ts"
+    );
+    expect(outOfScopeFindings).toHaveLength(1);
+    expect(outOfScopeFindings[0]?.title).toBe("Out-of-scope deterministic regression");
   }, 120000);
 });

@@ -52,6 +52,7 @@ export interface ToolchainDiscovery {
   lintCommands: string[];
   typeCheckCommands: string[];
   startCommand: string | null;
+  stopCommand: string | null;
   browserDeps: string[];
 }
 
@@ -103,6 +104,12 @@ export interface AdversaryConfig {
   testTimeoutMs: number;
   prTimeoutMs: number;
   summarizerTimeoutMs: number;
+  /**
+   * Timeout for startCommand and stopCommand (service lifecycle commands).
+   * Defaults to 300000ms (5 minutes). Even if a user provides a bad command,
+   * it fails fast rather than hanging for the full verifyTimeoutMs.
+   */
+  servicesTimeoutMs: number;
   browserAutomation: BrowserAutomationMode;
   customVerificationSteps: CustomVerificationStep[];
   skillOverrides: Record<string, SkillOverride>;
@@ -114,9 +121,10 @@ export const DEFAULT_CONFIG: AdversaryConfig = {
   summarizerCommandTemplate: "pi -p @{promptFile}",
   implementTimeoutMs: 10800000,
   verifyTimeoutMs: 900000,
-  testTimeoutMs: 1800000,
+  testTimeoutMs: 3600000,
   prTimeoutMs: 300000,
   summarizerTimeoutMs: 300000,
+  servicesTimeoutMs: 300000,
   browserAutomation: "warn",
   customVerificationSteps: [],
   skillOverrides: {},
@@ -167,23 +175,28 @@ export type RunOutcome =
   | "summarizer-failure"
   | "verify-failure"
   | "verify-error"
-  | "push-failure";
+  | "push-failure"
+  | "services-start-failure";
 
 /**
  * Returns human-readable labels for a RunOutcome.
  * Single source of truth shared across CLI and summary modules.
+ *
+ * The `kind` field drives `isFailureOutcome` — adding a new RunOutcome forces
+ * a new entry here (enforced by `satisfies`), so completeness is compile-checked.
  */
-export function getOutcomeLabels(outcome: RunOutcome): { humanizedSentence: string; summaryLabel: string } {
+export function getOutcomeLabels(outcome: RunOutcome): { humanizedSentence: string; summaryLabel: string; kind: "success" | "failure" | "incomplete" } {
   const labels = {
-    "clean":               { humanizedSentence: "all findings resolved",                   summaryLabel: "✓ Clean — zero threshold findings" },
-    "capped":              { humanizedSentence: "maximum turns reached with findings remaining", summaryLabel: "⚠ Capped — max turns reached with findings remaining" },
-    "implement-failure":   { humanizedSentence: "the implementer subprocess failed",        summaryLabel: "✗ Stopped — implementer step failed" },
-    "summarizer-failure":  { humanizedSentence: "the commit-message summarizer failed",     summaryLabel: "✗ Stopped — summarizer step failed" },
-    "verify-failure":      { humanizedSentence: "the verification pipeline failed",         summaryLabel: "✗ Stopped — verifier step failed" },
-    "verify-error":        { humanizedSentence: "the verification pipeline returned an error status", summaryLabel: "✗ Stopped — verifier returned error status" },
-    "commit-failure":      { humanizedSentence: "a pre-commit hook or git commit operation failed", summaryLabel: "✗ Stopped — commit step failed" },
-    "push-failure":        { humanizedSentence: "push to remote failed",                    summaryLabel: "✗ Stopped — push to remote failed" },
-  } satisfies Record<RunOutcome, { humanizedSentence: string; summaryLabel: string }>;
+    "clean":                   { humanizedSentence: "all findings resolved",                   summaryLabel: "✓ Clean — zero threshold findings",                        kind: "success"    as const },
+    "capped":                  { humanizedSentence: "maximum turns reached with findings remaining", summaryLabel: "⚠ Capped — max turns reached with findings remaining", kind: "incomplete" as const },
+    "implement-failure":       { humanizedSentence: "the implementer subprocess failed",        summaryLabel: "✗ Stopped — implementer step failed",                      kind: "failure"    as const },
+    "summarizer-failure":      { humanizedSentence: "the commit-message summarizer failed",     summaryLabel: "✗ Stopped — summarizer step failed",                       kind: "failure"    as const },
+    "verify-failure":          { humanizedSentence: "the verification pipeline failed",         summaryLabel: "✗ Stopped — verifier step failed",                         kind: "failure"    as const },
+    "verify-error":            { humanizedSentence: "the verification pipeline returned an error status", summaryLabel: "✗ Stopped — verifier returned error status",     kind: "failure"    as const },
+    "commit-failure":          { humanizedSentence: "a pre-commit hook or git commit operation failed", summaryLabel: "✗ Stopped — commit step failed",                  kind: "failure"    as const },
+    "push-failure":            { humanizedSentence: "push to remote failed",                    summaryLabel: "✗ Stopped — push to remote failed",                        kind: "failure"    as const },
+    "services-start-failure":  { humanizedSentence: "the services start command failed",        summaryLabel: "✗ Stopped — services start step failed",                   kind: "failure"    as const },
+  } satisfies Record<RunOutcome, { humanizedSentence: string; summaryLabel: string; kind: "success" | "failure" | "incomplete" }>;
   return labels[outcome];
 }
 
@@ -209,7 +222,7 @@ export interface TurnResult {
    * When the loop ends, RunState.outcome is set from the last TurnResult.outcome that
    * maps to a terminal state (e.g. "clean", "capped", etc.).
    */
-  outcome: "continue" | "clean" | "capped" | "commit-failure" | "implement-failure" | "summarizer-failure" | "verify-failure" | "verify-error";
+  outcome: "continue" | "clean" | "capped" | "commit-failure" | "implement-failure" | "summarizer-failure" | "verify-failure" | "verify-error" | "services-start-failure";
 }
 
 export interface RunState {

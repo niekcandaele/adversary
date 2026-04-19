@@ -19,6 +19,7 @@ import {
   getStatusShort,
   getFilesChangedByCommit,
   computeTouchedFilesByTurn,
+  hasCommitsAheadOfBase,
 } from "../src/git/index.js";
 
 async function gitInit(dir: string): Promise<void> {
@@ -509,6 +510,9 @@ describe("computeTouchedFilesByTurn", () => {
     await rm(touchedDir2, { recursive: true, force: true });
   });
 
+  // NOTE: Tests in this section dirty the shared `touchedDir2` fixture. `finally` blocks
+  // (in afterAll) clean up. If future parallelization is introduced, migrate to per-test
+  // fixtures (see the VI-77b test which uses a dedicated `cleanRepo`).
   test("maps files to turn numbers for multiple turns with commitSha", async () => {
     const { fileToTurns } = await computeTouchedFilesByTurn([
       { turn: 1, commitSha: sha1 },
@@ -601,68 +605,226 @@ describe("computeTouchedFilesByTurn", () => {
     expect(fileToTurns.has("file-b.ts")).toBe(false);
   });
 
-  test("records summarizer-failure turns in commitFailureTurns (uncommitted edits)", async () => {
+  test("records summarizer-failure turns in commitFailureTurns when it is the last turn (uncommitted edits)", async () => {
     // summarizer-failure: repoChanged=true but no commitSha (commit-message generator failed
-    // before commit). The working tree still carries those edits, so the turn must surface.
-    const { fileToTurns, commitFailureTurns } = await computeTouchedFilesByTurn([
-      { turn: 1, commitSha: undefined, outcome: "summarizer-failure", repoChanged: true },
-      { turn: 2, commitSha: sha2 },
-    ], touchedDir2);
+    // before commit). The working tree still carries those edits, so the turn must surface
+    // — but only if no later turn committed successfully (which would have cleaned it up).
+    // Dirty the working tree to simulate that uncommitted edits remain (the VI-77b clean-tree
+    // check must NOT suppress the entry when the tree is actually dirty).
+    const dirtyFile = join(touchedDir2, "uncommitted-summarizer-failure.ts");
+    await writeFile(dirtyFile, "dirty");
+    try {
+      const { fileToTurns, commitFailureTurns } = await computeTouchedFilesByTurn([
+        { turn: 1, commitSha: sha2 },
+        { turn: 2, commitSha: undefined, outcome: "summarizer-failure", repoChanged: true },
+      ], touchedDir2);
 
-    // Turn 1 has no commit, so no files attributed to it.
-    const allTurns = new Set(Array.from(fileToTurns.values()).flat().map((e) => e.turn));
-    expect(allTurns.has(1)).toBe(false);
-    expect(allTurns.has(2)).toBe(true);
+      // Turn 1 has a commit; turn 2 has no commit.
+      const allTurns = new Set(Array.from(fileToTurns.values()).flat().map((e) => e.turn));
+      expect(allTurns.has(1)).toBe(true);
 
-    // Turn 1 must appear in commitFailureTurns so the prompt surfaces the uncommitted edits.
-    expect(commitFailureTurns).toContain(1);
-    expect(commitFailureTurns).not.toContain(2);
+      // Turn 2 must appear in commitFailureTurns: it is the last turn and left dirty state.
+      expect(commitFailureTurns).toContain(2);
+      expect(commitFailureTurns).not.toContain(1);
+    } finally {
+      await rm(dirtyFile, { force: true });
+    }
   });
 
-  test("skips commit-failure turns (outcome:commit-failure) and records them in commitFailureTurns", async () => {
-    const { fileToTurns, commitFailureTurns } = await computeTouchedFilesByTurn([
+  test("skips commit-failure turns (outcome:commit-failure) and records them in commitFailureTurns when last", async () => {
+    // commit-failure on the last turn: no later commit resolves it, so it stays dirty.
+    // Dirty the working tree to simulate that uncommitted edits remain.
+    const dirtyFile = join(touchedDir2, "uncommitted-commit-failure.ts");
+    await writeFile(dirtyFile, "dirty");
+    try {
+      const { fileToTurns, commitFailureTurns } = await computeTouchedFilesByTurn([
+        { turn: 1, commitSha: sha2 },
+        { turn: 2, commitSha: undefined, outcome: "commit-failure" },
+      ], touchedDir2);
+
+      // Only turn 1's files should appear in fileToTurns
+      const allTurns = new Set(Array.from(fileToTurns.values()).flat().map((e) => e.turn));
+      expect(allTurns.has(1)).toBe(true);
+
+      // Turn 2 is the last and has no commit, so it should be recorded as a commit-failure turn
+      expect(commitFailureTurns).toContain(2);
+      expect(commitFailureTurns).not.toContain(1);
+    } finally {
+      await rm(dirtyFile, { force: true });
+    }
+  });
+
+  // VI-77: commit-failure turn followed by a successful commit must not appear in commitFailureTurns
+  test("(VI-77) commit-failure in turn 1 followed by successful commit in turn 2 is dropped from commitFailureTurns", async () => {
+    // Turn 1: commit-failure — edits left in working tree.
+    // Turn 2: successful commit — those edits (and possibly more) are now committed.
+    // Result: turn 1 must NOT appear in commitFailureTurns because the dirty state is gone.
+    const { commitFailureTurns } = await computeTouchedFilesByTurn([
       { turn: 1, commitSha: undefined, outcome: "commit-failure" },
       { turn: 2, commitSha: sha2 },
     ], touchedDir2);
 
-    // Only turn 2's files should appear in fileToTurns
-    const allTurns = new Set(Array.from(fileToTurns.values()).flat().map((e) => e.turn));
-    expect(allTurns.has(1)).toBe(false);
-    expect(allTurns.has(2)).toBe(true);
-
-    // Turn 1 should be recorded as a commit-failure turn
-    expect(commitFailureTurns).toContain(1);
+    expect(commitFailureTurns).not.toContain(1);
     expect(commitFailureTurns).not.toContain(2);
+  });
+
+  // VI-77: summarizer-failure turn followed by a successful commit must also be dropped
+  test("(VI-77) summarizer-failure in turn 1 followed by successful commit in turn 3 is dropped from commitFailureTurns", async () => {
+    // Turn 1: summarizer-failure — no commit, edits in working tree.
+    // Turn 2: another commit-failure — edits still not committed.
+    // Turn 3: successful commit — both earlier dirty turns are now resolved.
+    const { commitFailureTurns } = await computeTouchedFilesByTurn([
+      { turn: 1, commitSha: undefined, outcome: "summarizer-failure", repoChanged: true },
+      { turn: 2, commitSha: undefined, outcome: "commit-failure" },
+      { turn: 3, commitSha: sha2 },
+    ], touchedDir2);
+
+    expect(commitFailureTurns).not.toContain(1);
+    expect(commitFailureTurns).not.toContain(2);
+    expect(commitFailureTurns).not.toContain(3);
+  });
+
+  // VI-77: commit-failure on the final turn (no recovery) must still be reported
+  test("(VI-77) commit-failure on last turn with no later commit stays in commitFailureTurns", async () => {
+    // Dirty the working tree to simulate that the commit-failure left uncommitted edits behind.
+    const dirtyFile = join(touchedDir2, "uncommitted-vi77-last.ts");
+    await writeFile(dirtyFile, "dirty");
+    try {
+      const { commitFailureTurns } = await computeTouchedFilesByTurn([
+        { turn: 1, commitSha: sha1 },
+        { turn: 2, commitSha: undefined, outcome: "commit-failure" },
+      ], touchedDir2);
+
+      // Turn 2 is the last — nothing committed after it, and working tree is dirty.
+      expect(commitFailureTurns).toContain(2);
+      expect(commitFailureTurns).not.toContain(1);
+    } finally {
+      await rm(dirtyFile, { force: true });
+    }
   });
 
   test("no-op turns (outcome:continue, repoChanged:false) are silently skipped and NOT recorded in commitFailureTurns", async () => {
     // A no-op turn has no commitSha but outcome is "continue" (no changes were made).
     // It must NOT appear in commitFailureTurns — the working tree is clean, so the
     // "edits may be in the working tree" note would be incorrect.
-    const { fileToTurns, commitFailureTurns } = await computeTouchedFilesByTurn([
-      { turn: 1, commitSha: undefined, outcome: "continue", repoChanged: false },
-      { turn: 2, commitSha: undefined, outcome: "commit-failure" },
-    ], touchedDir2);
+    // Dirty the working tree so the commit-failure turn is not suppressed by the VI-77b check.
+    const dirtyFile = join(touchedDir2, "uncommitted-noop.ts");
+    await writeFile(dirtyFile, "dirty");
+    try {
+      const { fileToTurns, commitFailureTurns } = await computeTouchedFilesByTurn([
+        { turn: 1, commitSha: undefined, outcome: "continue", repoChanged: false },
+        { turn: 2, commitSha: undefined, outcome: "commit-failure" },
+      ], touchedDir2);
 
-    expect(fileToTurns.size).toBe(0);
-    // Only the commit-failure turn appears in commitFailureTurns.
-    expect(commitFailureTurns).not.toContain(1);
-    expect(commitFailureTurns).toContain(2);
+      expect(fileToTurns.size).toBe(0);
+      // Only the commit-failure turn appears in commitFailureTurns.
+      expect(commitFailureTurns).not.toContain(1);
+      expect(commitFailureTurns).toContain(2);
+    } finally {
+      await rm(dirtyFile, { force: true });
+    }
   });
 
   test("returns empty map when all turns have no commitSha", async () => {
-    const { fileToTurns, commitFailureTurns } = await computeTouchedFilesByTurn([
-      { turn: 1, commitSha: undefined, outcome: "commit-failure" },
-      { turn: 2, commitSha: undefined, outcome: "commit-failure" },
-    ], touchedDir2);
+    // Dirty the working tree so the commit-failure entries are not suppressed by the VI-77b check.
+    const dirtyFile = join(touchedDir2, "uncommitted-all-fail.ts");
+    await writeFile(dirtyFile, "dirty");
+    try {
+      const { fileToTurns, commitFailureTurns } = await computeTouchedFilesByTurn([
+        { turn: 1, commitSha: undefined, outcome: "commit-failure" },
+        { turn: 2, commitSha: undefined, outcome: "commit-failure" },
+      ], touchedDir2);
 
-    expect(fileToTurns.size).toBe(0);
-    expect(commitFailureTurns).toEqual([1, 2]);
+      expect(fileToTurns.size).toBe(0);
+      expect(commitFailureTurns).toEqual([1, 2]);
+    } finally {
+      await rm(dirtyFile, { force: true });
+    }
   });
 
   test("returns empty map for empty turns array", async () => {
     const { fileToTurns, commitFailureTurns } = await computeTouchedFilesByTurn([], touchedDir2);
     expect(fileToTurns.size).toBe(0);
     expect(commitFailureTurns).toEqual([]);
+  });
+
+  // VI-77b: resume-and-discard path — user manually ran `git checkout .` (or similar)
+  // to discard uncommitted edits without a subsequent commit. Working tree is clean but
+  // commitFailureTurns would otherwise still contain stale entries. The clean-tree check
+  // must drop all entries when the working tree has no changes.
+  test("(VI-77b) commit-failure in turn 1 with no later commit BUT clean working tree drops commitFailureTurns", async () => {
+    // Use a dedicated clean repo so we control working-tree state precisely.
+    const cleanRepo = await mkdtemp(join(tmpdir(), "adversary-vi77b-"));
+    try {
+      const run = async (args: string[], cwd: string): Promise<string> => {
+        const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+        await proc.exited;
+        return (await new Response(proc.stdout).text()).trim();
+      };
+      await run(["init", "-b", "main"], cleanRepo);
+      await run(["config", "user.email", "test@test.com"], cleanRepo);
+      await run(["config", "user.name", "Test"], cleanRepo);
+      // Create an initial commit so the repo is valid.
+      await writeFile(join(cleanRepo, "initial.ts"), "export const x = 1;");
+      await run(["add", "."], cleanRepo);
+      await run(["commit", "-m", "initial"], cleanRepo);
+
+      // Verify the working tree is clean (no uncommitted edits).
+      const isClean = !(await hasChanges(cleanRepo));
+      expect(isClean).toBe(true);
+
+      // Simulate: turn 1 = commit-failure, turn 2 = no commit (verify skipped, etc.).
+      // No later turn committed, so maxCommittedTurn check would NOT drop turn 1.
+      // But because the working tree is clean (user ran `git checkout .`), drop it.
+      const { commitFailureTurns } = await computeTouchedFilesByTurn([
+        { turn: 1, commitSha: undefined, outcome: "commit-failure" },
+      ], cleanRepo);
+
+      expect(commitFailureTurns).toEqual([]);
+    } finally {
+      await rm(cleanRepo, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("hasCommitsAheadOfBase", () => {
+  let aheadDir: string;
+
+  beforeAll(async () => {
+    aheadDir = await mkdtemp(join(tmpdir(), "adversary-git-ahead-"));
+    await gitInit(aheadDir);
+    await gitCommit(aheadDir, "initial commit on main");
+  });
+
+  afterAll(async () => {
+    await rm(aheadDir, { recursive: true, force: true });
+  });
+
+  test("returns false when feature branch is same as base", async () => {
+    // No commits ahead of main yet — feature branch IS main
+    const result = await hasCommitsAheadOfBase(aheadDir, "main", "main");
+    expect(result).toBe(false);
+  });
+
+  test("returns true when feature branch has commits ahead of base", async () => {
+    await createAndCheckoutBranch("feature-test-ahead", aheadDir);
+    // Write a unique file so git commit has something to commit
+    await writeFile(join(aheadDir, "feature-file.txt"), "feature content");
+    const add = Bun.spawn(["git", "add", "."], { cwd: aheadDir, stdout: "pipe", stderr: "pipe" });
+    await add.exited;
+    const commit = Bun.spawn(["git", "commit", "-m", "feature commit"], { cwd: aheadDir, stdout: "pipe", stderr: "pipe" });
+    await commit.exited;
+    const result = await hasCommitsAheadOfBase(aheadDir, "feature-test-ahead", "main");
+    expect(result).toBe(true);
+    // Clean up: go back to main
+    await checkoutBranch("main", aheadDir);
+  });
+
+  // VI-9: fallback returns true when baseBranch doesn't exist
+  test("(VI-9) returns true (fallback) when baseBranch does not exist locally", async () => {
+    // Use a nonexistent base branch — git rev-list will fail, triggering the fallback
+    // The fallback must return true so we don't suppress PR creation.
+    const result = await hasCommitsAheadOfBase(aheadDir, "main", "nonexistent-base-branch-xyz");
+    expect(result).toBe(true);
   });
 });
