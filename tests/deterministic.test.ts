@@ -19,6 +19,7 @@ const EMPTY_DISCOVERY: ToolchainDiscovery = {
   lintCommands: [],
   typeCheckCommands: [],
   startCommand: null,
+  stopCommand: null,
   browserDeps: [],
 };
 
@@ -30,6 +31,7 @@ describe("buildCommandSpecs", () => {
       lintCommands: ["bun run lint", "bunx prettier --check ."],
       typeCheckCommands: ["bun run typecheck"],
       startCommand: null,
+      stopCommand: null,
       browserDeps: [],
     }, BASE_CONFIG);
 
@@ -49,6 +51,7 @@ describe("buildCommandSpecs", () => {
       lintCommands: ["bun run lint"],
       typeCheckCommands: ["bun run typecheck"],
       startCommand: null,
+      stopCommand: null,
       browserDeps: [],
     }, {
       ...BASE_CONFIG,

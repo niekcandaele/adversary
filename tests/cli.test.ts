@@ -1,6 +1,7 @@
 import { test, expect, describe } from "bun:test";
 import { parseArgs } from "../src/cli/index.js";
 import { validateRunOptions, isFailureOutcome } from "../src/cli/run.js";
+import { getOutcomeLabels } from "../src/types/index.js";
 
 describe("parseArgs", () => {
   test("parses run command with required --plan flag", () => {
@@ -172,6 +173,11 @@ describe("isFailureOutcome (VI-1a)", () => {
   test("returns false for undefined", () => {
     expect(isFailureOutcome(undefined)).toBe(false);
   });
+
+  // VI-41: services-start-failure must be classified as a failure outcome
+  test("returns true for services-start-failure", () => {
+    expect(isFailureOutcome("services-start-failure")).toBe(true);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -235,3 +241,43 @@ describe("parseArgs — VI-1: --yes does not consume positional run-id", () => {
     expect(options["yes"]).toBe(true);
   });
 });
+
+// VI-57: getOutcomeLabels kind field
+describe("getOutcomeLabels kind field", () => {
+  test("clean outcome has kind=success", () => {
+    expect(getOutcomeLabels("clean").kind).toBe("success");
+  });
+
+  test("capped outcome has kind=incomplete", () => {
+    expect(getOutcomeLabels("capped").kind).toBe("incomplete");
+  });
+
+  test("verify-failure outcome has kind=failure", () => {
+    expect(getOutcomeLabels("verify-failure").kind).toBe("failure");
+  });
+
+  test("verify-error outcome has kind=failure", () => {
+    expect(getOutcomeLabels("verify-error").kind).toBe("failure");
+  });
+
+  test("implement-failure outcome has kind=failure", () => {
+    expect(getOutcomeLabels("implement-failure").kind).toBe("failure");
+  });
+
+  test("commit-failure outcome has kind=failure", () => {
+    expect(getOutcomeLabels("commit-failure").kind).toBe("failure");
+  });
+
+  test("services-start-failure outcome has kind=failure", () => {
+    expect(getOutcomeLabels("services-start-failure").kind).toBe("failure");
+  });
+
+  test("push-failure outcome has kind=failure", () => {
+    expect(getOutcomeLabels("push-failure").kind).toBe("failure");
+  });
+
+  test("summarizer-failure outcome has kind=failure", () => {
+    expect(getOutcomeLabels("summarizer-failure").kind).toBe("failure");
+  });
+});
+

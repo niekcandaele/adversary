@@ -217,6 +217,7 @@ function writeFakeConfig(
     verifyTimeoutMs: 30000,
     prTimeoutMs: 30000,
     summarizerTimeoutMs: 30000,
+    servicesTimeoutMs: 30000,
   };
   writeFileSync(configPath, JSON.stringify(config));
   return configPath;
@@ -765,6 +766,7 @@ exit 0
       verifyCommandTemplate: "true",
       summarizerCommandTemplate: `${summarizerScriptPath} @{promptFile}`,
       implementTimeoutMs: 30000, verifyTimeoutMs: 30000, prTimeoutMs: 10000, summarizerTimeoutMs: 10000,
+      servicesTimeoutMs: 30000,
       browserAutomation: "warn" as const, customVerificationSteps: [], skillOverrides: {},
       testTimeoutMs: 30000,
     };
@@ -818,6 +820,7 @@ exit 0
       verifyCommandTemplate: "true",
       summarizerCommandTemplate: `${summarizerScriptPath} @{promptFile}`,
       implementTimeoutMs: 30000, verifyTimeoutMs: 30000, prTimeoutMs: 10000, summarizerTimeoutMs: 10000,
+      servicesTimeoutMs: 30000,
       browserAutomation: "warn" as const, customVerificationSteps: [], skillOverrides: {},
       testTimeoutMs: 30000,
     };
@@ -888,6 +891,7 @@ exit 0
       verifyCommandTemplate: "true",
       summarizerCommandTemplate: `${summarizerScriptPath} @{promptFile}`,
       implementTimeoutMs: 30000, verifyTimeoutMs: 30000, prTimeoutMs: 10000, summarizerTimeoutMs: 10000,
+      servicesTimeoutMs: 30000,
       browserAutomation: "warn" as const, customVerificationSteps: [], skillOverrides: {},
       testTimeoutMs: 30000,
     };
@@ -953,6 +957,7 @@ exit 0
       verifyCommandTemplate: "true",
       summarizerCommandTemplate: `${summarizerScriptPath} @{promptFile}`,
       implementTimeoutMs: 30000, verifyTimeoutMs: 30000, prTimeoutMs: 10000, summarizerTimeoutMs: 10000,
+      servicesTimeoutMs: 30000,
       browserAutomation: "warn" as const, customVerificationSteps: [], skillOverrides: {},
       testTimeoutMs: 30000,
     };
@@ -971,4 +976,244 @@ exit 0
     expect(stdout).toMatch(/pushing branch|pushed ok/i);
     expect(await Bun.file(prCreateArgsLog).exists()).toBe(true);
   }, 60000);
+});
+
+// ────────────────────────────��──────────────────────────���─────────────────────
+// VI-6: failure outcome + commits → draft PR is still created with failure banner
+// Tests that when a capped outcome (threshold findings present) produces commits,
+// runCommand still calls gh pr create and the PR body contains the failure banner.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("runCommand — failure-outcome + commits → draft PR (VI-6)", () => {
+  let xdgStateDir: string;
+  let savedXdgStateHome: string | undefined;
+
+  beforeEach(async () => {
+    xdgStateDir = await mkdtemp(join(tmpdir(), "adversary-vi6-xdg-"));
+    savedXdgStateHome = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = xdgStateDir;
+  });
+
+  afterEach(async () => {
+    if (savedXdgStateHome === undefined) {
+      delete process.env.XDG_STATE_HOME;
+    } else {
+      process.env.XDG_STATE_HOME = savedXdgStateHome;
+    }
+    await rm(xdgStateDir, { recursive: true, force: true });
+  });
+
+  test("capped outcome with commits → gh pr create is still called", async () => {
+    const repoDir = await makeGitRepo();
+    const tmpBinDir = mkdtempSync(join(tmpdir(), "adversary-vi6-fakebin-"));
+
+    const binDir = join(tmpBinDir, "bin");
+    mkdirSync(binDir, { recursive: true });
+
+    const prCreateArgsLog = join(tmpBinDir, "pr-create-args.log");
+
+    // Implement: write a file so there's a commit
+    const implScript = writeScript(tmpBinDir, "fake-impl-vi6.sh",
+      `#!/bin/sh\necho "change $(date +%s%N)" >> ${join(repoDir, "impl-output.txt")}\nexit 0\n`
+    );
+
+    // Summarizer: outputs valid commit message + PR summary JSON
+    const summarizerPath = writeScript(tmpBinDir, "fake-summarizer-vi6.sh",
+      `#!/bin/sh
+PROMPT_FILE=""
+for arg in "$@"; do
+  case "$arg" in
+    @*) PROMPT_FILE="\${arg#@}" ;;
+  esac
+done
+CONTENT=$(cat "$PROMPT_FILE" 2>/dev/null || echo "")
+if echo "$CONTENT" | grep -qi "pull request\\|PR description\\|reviewer guide"; then
+  echo '{"title":"VI-6 Test","summary":"Changes made","reviewerGuide":"Review src/","testPlan":"Run bun test","issueNumber":null}'
+  exit 0
+fi
+echo '{"commitMessage":"feat: vi6 change","turnSummary":"Done."}'
+exit 0
+`
+    );
+
+    // Verify harness: synthesis returns findings at high severity → capped outcome at turn 1
+    const findingsJson = JSON.stringify([
+      { title: "High Sev Finding", severity: 9, description: "Blocking finding", sources: ["reviewer"] }
+    ]);
+    const verifyHarness = writeScript(tmpBinDir, "fake-verify-vi6.sh",
+      `#!/bin/sh
+PROMPT_FILE=""
+for arg in "$@"; do
+  case "$arg" in
+    @*) PROMPT_FILE="\${arg#@}" ;;
+  esac
+done
+if [ -z "$PROMPT_FILE" ]; then
+  echo '{"status":"completed","findings":[]}'
+  exit 0
+fi
+CONTENT=$(cat "$PROMPT_FILE" 2>/dev/null || echo "")
+if echo "$CONTENT" | grep -q "schemaVersion"; then
+  echo '{"schemaVersion":1,"status":"ok","findings":${findingsJson}}'
+  exit 0
+fi
+if echo "$CONTENT" | grep -q "toolchain discovery"; then
+  echo '{"testCommand":null,"buildCommand":null,"lintCommands":[],"typeCheckCommands":[],"startCommand":null,"stopCommand":null,"browserDeps":[]}'
+  exit 0
+fi
+echo '{"status":"completed","findings":[]}'
+exit 0
+`
+    );
+
+    // gh: auth check passes, pr create logs arguments
+    writeScript(binDir, "gh",
+      `#!/bin/sh
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then exit 0; fi
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then echo '[]'; exit 0; fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  printf '%s\\n' "$@" > "${prCreateArgsLog}"
+  echo "https://github.com/owner/repo/pull/99"
+  exit 0
+fi
+exit 0
+`
+    );
+    writeScript(binDir, "glab", `#!/bin/sh\necho "glab not expected" >&2\nexit 1\n`);
+
+    const fakeEnv: NodeJS.ProcessEnv = { ...process.env, PATH: `${binDir}:${process.env.PATH ?? ""}` };
+
+    const planPath = writePlan(tmpBinDir, "VI-6 Failure Banner Test");
+    const configPath = writeFakeConfig(tmpBinDir, {
+      implementCommandTemplate: `${implScript} @{promptFile}`,
+      verifyCommandTemplate: `${verifyHarness} @{promptFile}`,
+      summarizerCommandTemplate: `${summarizerPath} @{promptFile}`,
+    });
+
+    await runCommand({
+      plan: planPath,
+      turns: 1, // capped at turn 1 because findings >= threshold
+      severityThreshold: 7,
+      configFile: configPath,
+      cwd: repoDir,
+      env: fakeEnv,
+    });
+
+    // gh pr create must have been called (branch has commits, capped is not isFailureOutcome)
+    expect(await Bun.file(prCreateArgsLog).exists()).toBe(true);
+  }, 120000);
+
+  test("implement-failure with prior commits → gh pr create is called with failure banner", async () => {
+    // On turn 2, implement fails — but turn 1 already committed, so PR should still be created
+    // with a failure banner in the body.
+    const repoDir = await makeGitRepo();
+    const tmpBinDir = mkdtempSync(join(tmpdir(), "adversary-vi6b-fakebin-"));
+
+    const binDir = join(tmpBinDir, "bin");
+    mkdirSync(binDir, { recursive: true });
+
+    const prCreateArgsLog = join(tmpBinDir, "pr-create-args.log");
+    let implTurn = 0;
+
+    // Implement: succeeds on turn 1 (writes file), fails on turn 2
+    const implScript = writeScript(tmpBinDir, "fake-impl-vi6b.sh",
+      `#!/bin/sh
+TURN_FILE="${join(tmpBinDir, "impl-turn.txt")}"
+TURN=$(cat "$TURN_FILE" 2>/dev/null || echo "0")
+TURN=$((TURN + 1))
+echo "$TURN" > "$TURN_FILE"
+if [ "$TURN" = "1" ]; then
+  echo "change" >> ${join(repoDir, "impl-output.txt")}
+  exit 0
+else
+  exit 1
+fi
+`
+    );
+
+    // Summarizer: outputs valid commit/PR JSON
+    const summarizerPath = writeScript(tmpBinDir, "fake-summarizer-vi6b.sh",
+      `#!/bin/sh
+PROMPT_FILE=""
+for arg in "$@"; do
+  case "$arg" in
+    @*) PROMPT_FILE="\${arg#@}" ;;
+  esac
+done
+CONTENT=$(cat "$PROMPT_FILE" 2>/dev/null || echo "")
+if echo "$CONTENT" | grep -qi "pull request\\|PR description\\|reviewer guide"; then
+  echo '{"title":"VI-6b Test","summary":"Changes made","reviewerGuide":"Review src/","testPlan":"Run bun test","issueNumber":null}'
+  exit 0
+fi
+echo '{"commitMessage":"feat: vi6b change","turnSummary":"Done."}'
+exit 0
+`
+    );
+
+    // Verify: always returns findings so turn 1 continues to turn 2
+    const findingsJson = JSON.stringify([
+      { title: "Finding", severity: 5, description: "Minor", sources: ["reviewer"] }
+    ]);
+    const verifyHarness = writeScript(tmpBinDir, "fake-verify-vi6b.sh",
+      `#!/bin/sh
+PROMPT_FILE=""
+for arg in "$@"; do
+  case "$arg" in
+    @*) PROMPT_FILE="\${arg#@}" ;;
+  esac
+done
+CONTENT=$(cat "$PROMPT_FILE" 2>/dev/null || echo "")
+if echo "$CONTENT" | grep -q "schemaVersion"; then
+  echo '{"schemaVersion":1,"status":"ok","findings":${findingsJson}}'
+  exit 0
+fi
+if echo "$CONTENT" | grep -q "toolchain discovery"; then
+  echo '{"testCommand":null,"buildCommand":null,"lintCommands":[],"typeCheckCommands":[],"startCommand":null,"stopCommand":null,"browserDeps":[]}'
+  exit 0
+fi
+echo '{"status":"completed","findings":[]}'
+exit 0
+`
+    );
+
+    writeScript(binDir, "gh",
+      `#!/bin/sh
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then exit 0; fi
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then echo '[]'; exit 0; fi
+if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
+  printf '%s\\n' "$@" > "${prCreateArgsLog}"
+  echo "https://github.com/owner/repo/pull/99"
+  exit 0
+fi
+exit 0
+`
+    );
+    writeScript(binDir, "glab", `#!/bin/sh\necho "glab not expected" >&2\nexit 1\n`);
+
+    const fakeEnv: NodeJS.ProcessEnv = { ...process.env, PATH: `${binDir}:${process.env.PATH ?? ""}` };
+
+    const planPath = writePlan(tmpBinDir, "VI-6b Failure + Prior Commits");
+    const configPath = writeFakeConfig(tmpBinDir, {
+      implementCommandTemplate: `${implScript} @{promptFile}`,
+      verifyCommandTemplate: `${verifyHarness} @{promptFile}`,
+      summarizerCommandTemplate: `${summarizerPath} @{promptFile}`,
+    });
+
+    await runCommand({
+      plan: planPath,
+      turns: 2,
+      severityThreshold: 4, // threshold=4 so findings(sev=5) trigger continuation
+      configFile: configPath,
+      cwd: repoDir,
+      env: fakeEnv,
+    });
+
+    // Turn 2 implement fails → implement-failure, but turn 1 committed
+    // PR should be created because branch has commits ahead of base
+    expect(await Bun.file(prCreateArgsLog).exists()).toBe(true);
+
+    // The pr-create args must include --draft flag
+    const args = await Bun.file(prCreateArgsLog).text();
+    expect(args).toContain("--draft");
+  }, 120000);
 });

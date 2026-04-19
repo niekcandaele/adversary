@@ -13,6 +13,17 @@ export function buildDiscoveryContext(discovery: ToolchainDiscovery): string {
 }
 
 /**
+ * Build a JSON string of toolchain discovery for the exerciser prompt.
+ * Strips startCommand and stopCommand to prevent the exerciser LLM from
+ * attempting to start/stop services that the harness already manages.
+ * The exerciser prompt also contains explicit instructions not to re-start.
+ */
+export function buildExerciserDiscoveryContext(discovery: ToolchainDiscovery): string {
+  const { startCommand: _start, stopCommand: _stop, ...rest } = discovery;
+  return JSON.stringify(rest, null, 2);
+}
+
+/**
  * Build a human-readable summary of Phase 1 findings for the exerciser.
  */
 export function buildPhase1FindingsSummary(results: SkillResult[]): string {

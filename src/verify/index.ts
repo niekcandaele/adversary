@@ -18,12 +18,13 @@ import {
   buildScopeContext,
   buildScopeMetadata,
   buildDiscoveryContext,
+  buildExerciserDiscoveryContext,
   buildPhase1FindingsSummary,
 } from "./prompt-builder.js";
 import { synthesizeFallback } from "./synthesis-fallback.js";
 import { extractJson } from "../utils/json.js";
 import { runDeterministicCommands } from "./deterministic.js";
-import { validateRawFindings } from "./findings.js";
+import { validateRawFindings, filterFindingsByScope } from "./findings.js";
 import {
   ensureStepDir,
   writeBranchContextFile,
@@ -122,7 +123,11 @@ export async function runVerification(options: {
   const phase1Results: SkillResult[] = parallelResults.map((result, index) => {
     const stepName = allParallelNames[index] ?? "unknown-step";
     if (result.status === "fulfilled") {
-      return result.value;
+      // Apply scope filter to each skill's findings before synthesis
+      return {
+        ...result.value,
+        findings: filterFindingsByScope(result.value.findings, scope),
+      };
     }
     return frameworkThrownStep(stepName, `Verification step threw before producing artifacts: ${String(result.reason)}`);
   });
@@ -139,22 +144,40 @@ export async function runVerification(options: {
     env,
   });
 
+  // Deterministic findings are NOT scope-filtered: test failures, build errors, and type
+  // errors can legitimately appear in files that were not directly edited on this branch
+  // (e.g., a consumer file that now fails due to an interface change). Filtering them
+  // would silently drop repo-wide regressions introduced by the branch changes.
   const preExerciserResults = [...phase1Results, ...deterministicResults];
 
   process.stdout.write("  [verify] Running exerciser...\n");
+  // NOTE: buildExerciserDiscoveryContext strips startCommand/stopCommand for the exerciser
+  // but NOT for parallel-review skills (reviewer, qa, ux-reviewer, plan-completeness).
+  // This asymmetry is by design: only the exerciser prompt instructs the LLM to start
+  // the application and exercise it. Review skills receive the full discovery JSON as
+  // context but are never told to start anything, so the risk of accidental re-start is
+  // negligible. Stripping fields from review skills would remove useful context for no gain.
   const exerciserResult = await runBuiltinStep({
     skill: "exerciser",
     cwd,
     verifyDir,
     commonVars: {
       ...commonVars,
+      // Override discoveryJson for the exerciser: strip startCommand/stopCommand so
+      // the exerciser LLM does not attempt to re-start services the harness already owns.
+      // The exerciser.md prompt also contains explicit "do not re-start" instructions.
+      discoveryJson: buildExerciserDiscoveryContext(discovery),
       phase1Findings: buildPhase1FindingsSummary(preExerciserResults),
     },
     config,
     env,
   });
+  const scopedExerciserResult = {
+    ...exerciserResult,
+    findings: filterFindingsByScope(exerciserResult.findings, scope),
+  };
 
-  const allResults = [...preExerciserResults, exerciserResult];
+  const allResults = [...preExerciserResults, scopedExerciserResult];
 
   process.stdout.write("  [verify] Synthesizing findings...\n");
   const report = await runSynthesis({
@@ -166,6 +189,13 @@ export async function runVerification(options: {
     config,
     env,
   });
+
+  // NOTE: We deliberately do NOT apply a second scope filter here.
+  // Per-skill filtering already ran on parallel-review and exerciser results before
+  // synthesis (lines 126-130 and 164-167). Deterministic findings (build errors,
+  // test failures) are intentionally NOT scope-filtered — a type-change in a
+  // branch file can legitimately break a consumer file that was not directly edited.
+  // Re-filtering synthesized findings would silently drop those deterministic regressions.
 
   // Stamp the verify report with the current HEAD SHA so resume can detect
   // if the commit was amended or replaced between verification and resumption.

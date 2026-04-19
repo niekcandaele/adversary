@@ -154,6 +154,28 @@ export async function getRemoteBranchSha(branch: string, remote: string, cwd: st
   return sha ?? null;
 }
 
+/**
+ * Returns true when there is at least one commit on HEAD that is not yet
+ * in baseBranch (i.e. the branch has something worth pushing/PR-ing).
+ */
+export async function hasCommitsAheadOfBase(cwd: string, branch: string, baseBranch: string): Promise<boolean> {
+  // git rev-list --count baseBranch..HEAD counts commits reachable from HEAD but not baseBranch.
+  // We pass the actual branch name for clarity, but HEAD also works since we are on that branch.
+  const result = await git(["rev-list", "--count", `${baseBranch}..${branch}`], cwd);
+  if (result.exitCode !== 0) {
+    // Fallback: if the command fails (e.g. baseBranch doesn't exist locally), assume there are
+    // commits so we don't suppress PR creation. Log a warning so the condition is observable.
+    process.stderr.write(
+      `Warning: could not verify commits ahead of base branch "${baseBranch}" ` +
+      `(git rev-list exit ${result.exitCode}). Proceeding with PR creation. ` +
+      `Check that "${baseBranch}" exists locally if this is unexpected.\n`
+    );
+    return true;
+  }
+  const count = parseInt(result.stdout.trim(), 10);
+  return !isNaN(count) && count > 0;
+}
+
 export async function resetHard(ref: string, cwd: string): Promise<void> {
   await gitOrThrow(["reset", "--hard", ref], cwd);
 }
@@ -245,6 +267,42 @@ export async function computeTouchedFilesByTurn(
     // First SHA wins for duplicate turn numbers.
     if (!canonicalTurnMap.has(t.turn)) {
       canonicalTurnMap.set(t.turn, t.commitSha);
+    }
+  }
+
+  // Drop commit-failure turns that were subsequently recovered: if any later turn
+  // successfully committed (has an entry in canonicalTurnMap with a higher turn number),
+  // the earlier failure's uncommitted edits are no longer in the working tree.
+  const maxCommittedTurn = canonicalTurnMap.size > 0 ? Math.max(...canonicalTurnMap.keys()) : -1;
+  commitFailureTurns.splice(
+    0,
+    commitFailureTurns.length,
+    ...commitFailureTurns.filter((failTurn) => failTurn > maxCommittedTurn)
+  );
+
+  // Also handle the "resume-and-discard" path: if the user manually discarded uncommitted
+  // edits (e.g. `git checkout .`) between turns without a subsequent commit, the working
+  // tree will be clean but commitFailureTurns may still contain stale entries. Detect this
+  // by checking the current working tree state — if clean, all commit-failure entries are
+  // resolved regardless of commit history. (This check is fast: a single `git status` call.)
+  // Note: this does NOT handle recovery-via-commit (handled above by maxCommittedTurn).
+  if (commitFailureTurns.length > 0) {
+    const currentlyClean = !(await hasChanges(cwd));
+    // Known limitations: this check is based on `git status --porcelain` being empty.
+    // It will ALSO treat the following scenarios as 'clean' even though the underlying
+    // state differs:
+    //   - `git stash` — stashed changes are hidden but recoverable. The working tree
+    //     looks clean even though edits exist in the stash.
+    //   - External edits committed in a side-branch outside the run's tracked SHAs.
+    //     Those commits won't appear in canonicalTurnMap, so the files won't be surfaced.
+    //   - Partial manual commits where some edits remain in another branch.
+    //     Same issue: those SHAs are unknown to this run.
+    // These are rare edge cases and cause only prompt-quality noise (warning about
+    // commit-failure turns that seem resolved), not correctness issues. If users hit
+    // this in practice, we can refine by inspecting `git stash list` and
+    // cross-referencing turn-originated files.
+    if (currentlyClean) {
+      commitFailureTurns.length = 0;
     }
   }
 

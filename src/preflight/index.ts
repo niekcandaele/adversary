@@ -59,6 +59,26 @@ export function extractHarnessBinary(commandTemplate: string): string {
 }
 
 /**
+ * Check that setsid (util-linux) is available in PATH.
+ * setsid is required so the runner can spawn processes in a new session and
+ * kill the entire process group on timeout via process.kill(-pgid, signal).
+ *
+ * Exported for unit testing.
+ */
+export async function checkSetsid(env?: NodeJS.ProcessEnv): Promise<{ ok: boolean; reason?: string }> {
+  if (await commandExists("setsid", env)) return { ok: true };
+  return {
+    ok: false,
+    reason:
+      "setsid (util-linux) is required but not found in PATH.\n" +
+      "  - macOS:         brew install util-linux\n" +
+      "  - Debian/Ubuntu: apt-get install util-linux\n" +
+      "  - Alpine:        apk add util-linux\n" +
+      "  - RHEL/Fedora:   dnf install util-linux",
+  };
+}
+
+/**
  * Check that all harness binaries used in command templates are in PATH.
  * Exported for unit testing.
  */
@@ -149,6 +169,12 @@ export async function runPreflight(
   // 4. Required commands — git must always be present
   if (!(await commandExists("git", env))) {
     throw new PreflightError("git is not available in PATH.");
+  }
+
+  // 4a. setsid is required for process-group kill on timeout
+  const setsidCheck = await checkSetsid(env);
+  if (!setsidCheck.ok) {
+    throw new PreflightError(setsidCheck.reason!);
   }
 
   // 5. Check harness binaries from command templates

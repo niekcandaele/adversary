@@ -45,6 +45,7 @@ const EMPTY_DISCOVERY: ToolchainDiscovery = {
   lintCommands: [],
   typeCheckCommands: [],
   startCommand: null,
+  stopCommand: null,
   browserDeps: [],
 };
 

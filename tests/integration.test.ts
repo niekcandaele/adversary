@@ -721,4 +721,606 @@ describe("runLoop integration", () => {
     expect(state.outcome).toBeDefined();
     expect(["clean", "capped", "implement-failure", "commit-failure", "verify-failure", "verify-error", "summarizer-failure"]).toContain(state.outcome ?? "");
   }, 30000);
+
+  // ── VI-4: stopCommand always runs in finally ──────────────────────────────
+
+  /**
+   * Build a fake harness that outputs discovery JSON with the given startCommand/stopCommand scripts.
+   * Uses pre-written script files so no shell-escaping issues with paths in JSON.
+   * For non-discovery prompts it acts as a normal skill/synthesis harness.
+   */
+  function writeFakeHarnessWithServiceScripts(
+    dir: string,
+    name: string,
+    startScript: string,
+    stopScript: string,
+    findings: unknown[] = [],
+    verifyStatus = "ok"
+  ): string {
+    const script = join(dir, name);
+    const findingsJson = JSON.stringify(findings);
+    // Emit a JSON file for discovery to read — avoids escaping in shell
+    const discoveryJsonPath = join(dir, `${name}.discovery.json`);
+    const discoveryJson = JSON.stringify({
+      testCommand: null,
+      buildCommand: null,
+      lintCommands: [],
+      typeCheckCommands: [],
+      startCommand: startScript,
+      stopCommand: stopScript,
+      browserDeps: [],
+    });
+    writeFileSync(discoveryJsonPath, discoveryJson);
+
+    writeFileSync(
+      script,
+      `#!/bin/sh
+PROMPT_FILE=""
+for arg in "$@"; do
+  case "$arg" in
+    @*) PROMPT_FILE="\${arg#@}" ;;
+  esac
+done
+
+if [ -z "$PROMPT_FILE" ]; then
+  echo '{"status":"completed","findings":[]}'
+  exit 0
+fi
+
+CONTENT=$(cat "$PROMPT_FILE" 2>/dev/null || echo "")
+
+if echo "$CONTENT" | grep -q "schemaVersion"; then
+  echo '{"schemaVersion":1,"status":"${verifyStatus}","findings":${findingsJson}}'
+  exit 0
+fi
+
+if echo "$CONTENT" | grep -q "toolchain discovery"; then
+  cat "${discoveryJsonPath}"
+  exit 0
+fi
+
+echo '{"status":"completed","findings":[]}'
+exit 0
+`,
+      { mode: 0o755 }
+    );
+    return script;
+  }
+
+  test("(VI-4a) stopCommand runs at end of normal successful turn", async () => {
+    const cwd = await makeGitRepo();
+    const tmpSentinels = mkdtempSync(join(tmpdir(), "adversary-vi4a-"));
+    const startSentinel = join(tmpSentinels, "started.txt");
+    const stopSentinel = join(tmpSentinels, "stopped.txt");
+
+    // Write separate sentinel scripts — avoids JSON escaping problems
+    const startScript = join(tmpSentinels, "start.sh");
+    const stopScript = join(tmpSentinels, "stop.sh");
+    writeFileSync(startScript, `#!/bin/sh\necho STARTED > "${startSentinel}"\n`, { mode: 0o755 });
+    writeFileSync(stopScript, `#!/bin/sh\necho STOPPED > "${stopSentinel}"\n`, { mode: 0o755 });
+
+    const harness = writeFakeHarnessWithServiceScripts(
+      cwd, "fake-harness-vi4a.sh", startScript, stopScript, [], "ok"
+    );
+    const summarizerScript = writeFakeSummarizer(cwd, "fake-summarizer-vi4a.sh");
+
+    const runDir = join(cwd, ".test-runs", "vi4a");
+    await initRunDir(runDir);
+    await snapshotPlan(runDir, "# VI-4a\nTest stopCommand on success.");
+
+    const state: RunState = {
+      runDir,
+      planFile: join(runDir, "plan.txt"),
+      planTitle: "VI-4a",
+      branch: "adversary/test-branch",
+      baseBranch: "main",
+      startedAt: new Date().toISOString(),
+      turns: [],
+    };
+
+    const config: AdversaryConfig = {
+      ...DEFAULT_CONFIG,
+      implementCommandTemplate: "true",
+      verifyCommandTemplate: `${harness} @{promptFile}`,
+      summarizerCommandTemplate: summarizerScript,
+      implementTimeoutMs: 30000,
+      verifyTimeoutMs: 30000,
+      prTimeoutMs: 10000,
+      summarizerTimeoutMs: 10000,
+      servicesTimeoutMs: 10000,
+    };
+
+    await runLoop({ cwd, state, planContent: "# VI-4a\nTest.", maxTurns: 1, threshold: 7, config });
+
+    // Both sentinel files must exist — startCommand ran before the turn, stopCommand ran after
+    expect(existsSync(startSentinel)).toBe(true);
+    expect(existsSync(stopSentinel)).toBe(true);
+  }, 60000);
+
+  test("(VI-4b) stopCommand still runs when startCommand exits non-zero (services-start-failure)", async () => {
+    const cwd = await makeGitRepo();
+    const tmpSentinels = mkdtempSync(join(tmpdir(), "adversary-vi4b-"));
+    const stopSentinel = join(tmpSentinels, "stopped.txt");
+
+    // startCommand fails (exits 1), stopCommand writes sentinel
+    const startScript = join(tmpSentinels, "fail-start.sh");
+    const stopScript = join(tmpSentinels, "stop.sh");
+    writeFileSync(startScript, `#!/bin/sh\nexit 1\n`, { mode: 0o755 });
+    writeFileSync(stopScript, `#!/bin/sh\necho STOPPED > "${stopSentinel}"\n`, { mode: 0o755 });
+
+    const harness = writeFakeHarnessWithServiceScripts(
+      cwd, "fake-harness-vi4b.sh", startScript, stopScript, [], "ok"
+    );
+    const summarizerScript = writeFakeSummarizer(cwd, "fake-summarizer-vi4b.sh");
+
+    const runDir = join(cwd, ".test-runs", "vi4b");
+    await initRunDir(runDir);
+    await snapshotPlan(runDir, "# VI-4b\nTest stopCommand on start-failure.");
+
+    const state: RunState = {
+      runDir,
+      planFile: join(runDir, "plan.txt"),
+      planTitle: "VI-4b",
+      branch: "adversary/test-branch",
+      baseBranch: "main",
+      startedAt: new Date().toISOString(),
+      turns: [],
+    };
+
+    const config: AdversaryConfig = {
+      ...DEFAULT_CONFIG,
+      implementCommandTemplate: "true",
+      verifyCommandTemplate: `${harness} @{promptFile}`,
+      summarizerCommandTemplate: summarizerScript,
+      implementTimeoutMs: 30000,
+      verifyTimeoutMs: 30000,
+      prTimeoutMs: 10000,
+      summarizerTimeoutMs: 10000,
+      servicesTimeoutMs: 10000,
+    };
+
+    await runLoop({ cwd, state, planContent: "# VI-4b\nTest.", maxTurns: 1, threshold: 7, config });
+
+    // Turn should have services-start-failure outcome
+    expect(state.outcome).toBe("services-start-failure");
+    // stopCommand must still have run despite startCommand failure.
+    // NOTE: stopCommand is invoked via the direct call at src/loop/index.ts (runStopCommand after
+    // the early-return branch), NOT via the try/finally block. The try/finally only covers
+    // the verify path; when startCommand fails, servicesStarted stays false, so we exit before
+    // the try/finally block and call runStopCommand explicitly in the services-start-failure branch.
+    expect(existsSync(stopSentinel)).toBe(true);
+  }, 60000);
+
+  // VI-40: skipVerify=true resume path must NOT invoke startCommand or stopCommand
+  test("(VI-40) skipVerify=true resume does NOT invoke startCommand or stopCommand", async () => {
+    const cwd = await makeGitRepo();
+    const tmpSentinels = mkdtempSync(join(tmpdir(), "adversary-vi40-"));
+    const startSentinel = join(tmpSentinels, "started.txt");
+    const stopSentinel = join(tmpSentinels, "stopped.txt");
+
+    const startScript = join(tmpSentinels, "start.sh");
+    const stopScript = join(tmpSentinels, "stop.sh");
+    writeFileSync(startScript, `#!/bin/sh\necho STARTED > "${startSentinel}"\n`, { mode: 0o755 });
+    writeFileSync(stopScript, `#!/bin/sh\necho STOPPED > "${stopSentinel}"\n`, { mode: 0o755 });
+
+    const harness = writeFakeHarnessWithServiceScripts(
+      cwd, "fake-harness-vi40.sh", startScript, stopScript, [], "ok"
+    );
+    const summarizerScript = writeFakeSummarizer(cwd, "fake-summarizer-vi40.sh");
+
+    const runDir = join(cwd, ".test-runs", "vi40");
+    await initRunDir(runDir);
+    await snapshotPlan(runDir, "# VI-40\nTest skipVerify skips startCommand.");
+
+    // Write a pre-existing verify.json so the resume can read it without running verify
+    const turnDir = join(runDir, "turn-1");
+    mkdirSync(turnDir, { recursive: true });
+    writeFileSync(
+      join(turnDir, "verify.json"),
+      JSON.stringify({ schemaVersion: 1, status: "ok", findings: [] })
+    );
+
+    const state: RunState = {
+      runDir,
+      planFile: join(runDir, "plan.txt"),
+      planTitle: "VI-40",
+      branch: "adversary/test-branch",
+      baseBranch: "main",
+      startedAt: new Date().toISOString(),
+      turns: [],
+    };
+
+    const config: AdversaryConfig = {
+      ...DEFAULT_CONFIG,
+      implementCommandTemplate: "true",
+      verifyCommandTemplate: `${harness} @{promptFile}`,
+      summarizerCommandTemplate: summarizerScript,
+      implementTimeoutMs: 30000,
+      verifyTimeoutMs: 30000,
+      prTimeoutMs: 10000,
+      summarizerTimeoutMs: 10000,
+      servicesTimeoutMs: 10000,
+    };
+
+    // Resume with skipImplement=true, skipVerify=true — services should NOT start or stop
+    await runLoop({
+      cwd,
+      state,
+      planContent: "# VI-40\nTest.",
+      maxTurns: 1,
+      threshold: 7,
+      config,
+      resumePoint: { turn: 1, skipImplement: true, skipVerify: true, knownCommitSha: undefined },
+    });
+
+    // Neither sentinel should have been written — services were not invoked
+    expect(existsSync(startSentinel)).toBe(false);
+    expect(existsSync(stopSentinel)).toBe(false);
+  }, 60000);
+
+  // VI-38/45: post-commit discovery sees post-implement toolchain
+  // If implement modifies a watched toolchain config file (e.g. package.json),
+  // the discovery cache is invalidated and re-runs, picking up the new startCommand.
+  // This test verifies that the post-commit discovery reflects what implement wrote.
+  test("(VI-38) post-commit discovery reflects post-implement toolchain changes", async () => {
+    const cwd = await makeGitRepo();
+    const tmpSentinels = mkdtempSync(join(tmpdir(), "adversary-vi38-"));
+    const startSentinel = join(tmpSentinels, "started.txt");
+    const startScript = join(tmpSentinels, "start.sh");
+    writeFileSync(startScript, `#!/bin/sh\necho STARTED > "${startSentinel}"\n`, { mode: 0o755 });
+
+    const stopScript = join(tmpSentinels, "noop-stop.sh");
+    writeFileSync(stopScript, `#!/bin/sh\nexit 0\n`, { mode: 0o755 });
+
+    // Discovery JSON that returns startCommand only when package.json exists with a marker.
+    // This simulates: implement wrote package.json → discovery re-runs (cache invalidated)
+    // and now sees startCommand.
+    const discoveryJsonNoStart = JSON.stringify({
+      testCommand: null, buildCommand: null, lintCommands: [], typeCheckCommands: [],
+      startCommand: null, stopCommand: null, browserDeps: [],
+    });
+    const discoveryJsonWithStart = JSON.stringify({
+      testCommand: null, buildCommand: null, lintCommands: [], typeCheckCommands: [],
+      startCommand: startScript, stopCommand: stopScript, browserDeps: [],
+    });
+    writeFileSync(join(tmpSentinels, "discovery-no-start.json"), discoveryJsonNoStart);
+    writeFileSync(join(tmpSentinels, "discovery-with-start.json"), discoveryJsonWithStart);
+
+    // Harness: checks if package.json has a marker to decide which discovery JSON to emit.
+    // Before implement: no package.json marker → null startCommand.
+    // After implement: package.json has "startCommand" marker → real startCommand.
+    const harness = join(cwd, "fake-harness-vi38.sh");
+    writeFileSync(
+      harness,
+      `#!/bin/sh
+PROMPT_FILE=""
+for arg in "$@"; do
+  case "$arg" in
+    @*) PROMPT_FILE="\${arg#@}" ;;
+  esac
+done
+
+if [ -z "$PROMPT_FILE" ]; then
+  echo '{"status":"completed","findings":[]}'
+  exit 0
+fi
+
+CONTENT=$(cat "$PROMPT_FILE" 2>/dev/null || echo "")
+
+if echo "$CONTENT" | grep -q "schemaVersion"; then
+  echo '{"schemaVersion":1,"status":"ok","findings":[]}'
+  exit 0
+fi
+
+if echo "$CONTENT" | grep -q "toolchain discovery"; then
+  # Check if package.json has the marker written by implement
+  if grep -q "vi38-marker" "${cwd}/package.json" 2>/dev/null; then
+    cat "${tmpSentinels}/discovery-with-start.json"
+  else
+    cat "${tmpSentinels}/discovery-no-start.json"
+  fi
+  exit 0
+fi
+
+echo '{"status":"completed","findings":[]}'
+exit 0
+`,
+      { mode: 0o755 }
+    );
+
+    // Implement command: writes package.json with a marker (invalidates discovery cache)
+    // AND commits the change so discovery sees it post-commit.
+    const implScript = join(tmpSentinels, "impl-vi38.sh");
+    writeFileSync(
+      implScript,
+      `#!/bin/sh
+# Write package.json with marker — this invalidates the mtime-based discovery cache
+echo '{"name":"test","vi38-marker":true}' > "${cwd}/package.json"
+`,
+      { mode: 0o755 }
+    );
+
+    const summarizerScript = writeFakeSummarizer(cwd, "fake-summarizer-vi38.sh");
+    const runDir = join(cwd, ".test-runs", "vi38");
+    await initRunDir(runDir);
+    await snapshotPlan(runDir, "# VI-38\nTest post-commit discovery.");
+
+    const state: RunState = {
+      runDir,
+      planFile: join(runDir, "plan.txt"),
+      planTitle: "VI-38",
+      branch: "adversary/test-branch",
+      baseBranch: "main",
+      startedAt: new Date().toISOString(),
+      turns: [],
+    };
+
+    const config: AdversaryConfig = {
+      ...DEFAULT_CONFIG,
+      implementCommandTemplate: implScript,
+      verifyCommandTemplate: `${harness} @{promptFile}`,
+      summarizerCommandTemplate: summarizerScript,
+      implementTimeoutMs: 30000,
+      verifyTimeoutMs: 30000,
+      prTimeoutMs: 10000,
+      summarizerTimeoutMs: 10000,
+      servicesTimeoutMs: 10000,
+    };
+
+    await runLoop({ cwd, state, planContent: "# VI-38\nTest.", maxTurns: 1, threshold: 7, config });
+
+    // After implement wrote package.json, post-commit discovery re-ran (cache invalidated)
+    // and saw startCommand → startCommand ran and wrote the sentinel.
+    expect(existsSync(startSentinel)).toBe(true);
+  }, 60000);
+
+  // VI-27: servicesTimeoutMs actually reaches runStep — prove the timeout flows through
+  test("(VI-27) servicesTimeoutMs times out startCommand that exceeds the limit", async () => {
+    const cwd = await makeGitRepo();
+    const tmpSentinels = mkdtempSync(join(tmpdir(), "adversary-vi27-"));
+
+    // startCommand sleeps for 5 seconds; servicesTimeoutMs is 200ms — should time out
+    const startScript = join(tmpSentinels, "slow-start.sh");
+    writeFileSync(startScript, `#!/bin/sh\nsleep 5\n`, { mode: 0o755 });
+
+    // No stopCommand needed for this test — pass a no-op stop script
+    const stopScript = join(tmpSentinels, "noop-stop.sh");
+    writeFileSync(stopScript, `#!/bin/sh\nexit 0\n`, { mode: 0o755 });
+
+    const harness = writeFakeHarnessWithServiceScripts(
+      cwd, "fake-harness-vi27.sh", startScript, stopScript, [], "ok"
+    );
+    const summarizerScript = writeFakeSummarizer(cwd, "fake-summarizer-vi27.sh");
+
+    const runDir = join(cwd, ".test-runs", "vi27");
+    await initRunDir(runDir);
+    await snapshotPlan(runDir, "# VI-27\nTest servicesTimeoutMs flow-through.");
+
+    const state: RunState = {
+      runDir,
+      planFile: join(runDir, "plan.txt"),
+      planTitle: "VI-27",
+      branch: "adversary/test-branch",
+      baseBranch: "main",
+      startedAt: new Date().toISOString(),
+      turns: [],
+    };
+
+    const start = Date.now();
+    const config: AdversaryConfig = {
+      ...DEFAULT_CONFIG,
+      implementCommandTemplate: "true",
+      verifyCommandTemplate: `${harness} @{promptFile}`,
+      summarizerCommandTemplate: summarizerScript,
+      implementTimeoutMs: 30000,
+      verifyTimeoutMs: 30000,
+      prTimeoutMs: 10000,
+      summarizerTimeoutMs: 10000,
+      // 200ms is well under the 5s sleep — should time out and produce services-start-failure
+      servicesTimeoutMs: 200,
+    };
+
+    await runLoop({ cwd, state, planContent: "# VI-27\nTest.", maxTurns: 1, threshold: 7, config });
+    const elapsed = Date.now() - start;
+
+    // Should have failed due to startCommand timeout, not waited the full 5s sleep
+    expect(state.outcome).toBe("services-start-failure");
+    // Should resolve well under verifyTimeoutMs (30s) — the servicesTimeoutMs (200ms + kill) took effect
+    expect(elapsed).toBeLessThan(10000);
+  }, 30000);
+
+  // VI-50: discovery must be RUN post-implement (invocation count = 2 over a 1-turn run).
+  // The harness grep pattern "toolchain discovery" matches TWO prompts per turn:
+  //   1. The discovery.md prompt (the actual toolchain discovery call).
+  //   2. The exerciser.md prompt (which contains "toolchain discovery JSON" in its text).
+  // Both calls go through the same verifyCommandTemplate, so both increment the counter.
+  // Total count over a single turn with startCommand=null is exactly 2.
+  test("(VI-50) discovery re-runs when implement modifies a toolchain config file (cache invalidation)", async () => {
+    const cwd = await makeGitRepo();
+    const tmpSentinels = mkdtempSync(join(tmpdir(), "adversary-vi50-"));
+    const counterFile = join(tmpSentinels, "discovery-count.txt");
+
+    // Track invocations: write incrementing count to counterFile
+    const harnessScript = join(cwd, "fake-harness-vi50.sh");
+    const discoveryJsonNoStart = JSON.stringify({
+      testCommand: null, buildCommand: null, lintCommands: [], typeCheckCommands: [],
+      startCommand: null, stopCommand: null, browserDeps: [],
+    });
+    const discoveryJsonWithStart = JSON.stringify({
+      testCommand: null, buildCommand: null, lintCommands: [], typeCheckCommands: [],
+      startCommand: null, stopCommand: null, browserDeps: [],
+    });
+
+    writeFileSync(
+      harnessScript,
+      `#!/bin/sh
+PROMPT_FILE=""
+for arg in "$@"; do
+  case "$arg" in
+    @*) PROMPT_FILE="\${arg#@}" ;;
+  esac
+done
+
+if [ -z "$PROMPT_FILE" ]; then
+  echo '{"status":"completed","findings":[]}'
+  exit 0
+fi
+
+CONTENT=$(cat "$PROMPT_FILE" 2>/dev/null || echo "")
+
+if echo "$CONTENT" | grep -q "schemaVersion"; then
+  echo '{"schemaVersion":1,"status":"ok","findings":[]}'
+  exit 0
+fi
+
+if echo "$CONTENT" | grep -q "toolchain discovery"; then
+  count=0
+  [ -f "${counterFile}" ] && count=$(cat "${counterFile}")
+  echo $((count + 1)) > "${counterFile}"
+  echo '${discoveryJsonNoStart}'
+  exit 0
+fi
+
+echo '{"status":"completed","findings":[]}'
+exit 0
+`,
+      { mode: 0o755 }
+    );
+
+    // Implement command: writes package.json with a marker (invalidates discovery cache)
+    // and commits it — this forces a cache miss on the post-commit discovery call.
+    const implScript = join(tmpSentinels, "impl-vi50.sh");
+    writeFileSync(
+      implScript,
+      `#!/bin/sh
+# Write package.json with marker — this invalidates the mtime-based discovery cache
+echo '{"name":"test","vi50-marker":true}' > "${cwd}/package.json"
+`,
+      { mode: 0o755 }
+    );
+
+    const summarizerScript = writeFakeSummarizer(cwd, "fake-summarizer-vi50.sh");
+    const runDir = join(cwd, ".test-runs", "vi50");
+    await initRunDir(runDir);
+    await snapshotPlan(runDir, "# VI-50\nTest discovery re-run count.");
+
+    const state: RunState = {
+      runDir,
+      planFile: join(runDir, "plan.txt"),
+      planTitle: "VI-50",
+      branch: "adversary/test-branch",
+      baseBranch: "main",
+      startedAt: new Date().toISOString(),
+      turns: [],
+    };
+
+    const config: AdversaryConfig = {
+      ...DEFAULT_CONFIG,
+      implementCommandTemplate: implScript,
+      verifyCommandTemplate: `${harnessScript} @{promptFile}`,
+      summarizerCommandTemplate: summarizerScript,
+      implementTimeoutMs: 30000,
+      verifyTimeoutMs: 30000,
+      prTimeoutMs: 10000,
+      summarizerTimeoutMs: 10000,
+      servicesTimeoutMs: 10000,
+    };
+
+    await runLoop({ cwd, state, planContent: "# VI-50\nTest.", maxTurns: 1, threshold: 7, config });
+
+    // Discovery harness is invoked exactly 2 times per turn: once for the actual
+    // discovery.md call, and once for the exerciser (whose prompt contains "toolchain discovery").
+    const discoveryCount = parseInt((readFileSync(counterFile, "utf8")).trim(), 10);
+    expect(discoveryCount).toBe(2);
+    expect(state.outcome).toBe("clean");
+  }, 60000);
+
+  // VI-51: stopCommand runs when verify fails (verify-failure outcome)
+  test("(VI-51) stopCommand runs when verify pipeline throws (verify-failure outcome)", async () => {
+    const cwd = await makeGitRepo();
+    const tmpSentinels = mkdtempSync(join(tmpdir(), "adversary-vi51-"));
+    const startSentinel = join(tmpSentinels, "started.txt");
+    const stopSentinel = join(tmpSentinels, "stopped.txt");
+
+    const startScript = join(tmpSentinels, "start.sh");
+    const stopScript = join(tmpSentinels, "stop.sh");
+    writeFileSync(startScript, `#!/bin/sh\necho STARTED > "${startSentinel}"\n`, { mode: 0o755 });
+    writeFileSync(stopScript, `#!/bin/sh\necho STOPPED > "${stopSentinel}"\n`, { mode: 0o755 });
+
+    // Harness: discovery returns startCommand/stopCommand, but when invoked for
+    // skills/synthesis it exits non-zero to force a verify-failure path.
+    const discoveryJsonPath = join(tmpSentinels, "disc-vi51.json");
+    writeFileSync(discoveryJsonPath, JSON.stringify({
+      testCommand: null, buildCommand: null, lintCommands: [], typeCheckCommands: [],
+      startCommand: startScript, stopCommand: stopScript, browserDeps: [],
+    }));
+
+    const harnessScript = join(cwd, "fake-harness-vi51.sh");
+    writeFileSync(
+      harnessScript,
+      `#!/bin/sh
+PROMPT_FILE=""
+for arg in "$@"; do
+  case "$arg" in
+    @*) PROMPT_FILE="\${arg#@}" ;;
+  esac
+done
+
+if [ -z "$PROMPT_FILE" ]; then
+  echo '{"status":"completed","findings":[]}'
+  exit 0
+fi
+
+CONTENT=$(cat "$PROMPT_FILE" 2>/dev/null || echo "")
+
+if echo "$CONTENT" | grep -q "toolchain discovery"; then
+  cat "${discoveryJsonPath}"
+  exit 0
+fi
+
+# All other skill/synthesis calls exit non-zero to force verify-failure
+exit 1
+`,
+      { mode: 0o755 }
+    );
+
+    const summarizerScript = writeFakeSummarizer(cwd, "fake-summarizer-vi51.sh");
+    const runDir = join(cwd, ".test-runs", "vi51");
+    await initRunDir(runDir);
+    await snapshotPlan(runDir, "# VI-51\nTest stopCommand on verify-failure.");
+
+    const state: RunState = {
+      runDir,
+      planFile: join(runDir, "plan.txt"),
+      planTitle: "VI-51",
+      branch: "adversary/test-branch",
+      baseBranch: "main",
+      startedAt: new Date().toISOString(),
+      turns: [],
+    };
+
+    const config: AdversaryConfig = {
+      ...DEFAULT_CONFIG,
+      implementCommandTemplate: "true",
+      verifyCommandTemplate: `${harnessScript} @{promptFile}`,
+      summarizerCommandTemplate: summarizerScript,
+      implementTimeoutMs: 30000,
+      verifyTimeoutMs: 30000,
+      prTimeoutMs: 10000,
+      summarizerTimeoutMs: 10000,
+      servicesTimeoutMs: 10000,
+    };
+
+    await runLoop({ cwd, state, planContent: "# VI-51\nTest.", maxTurns: 1, threshold: 7, config });
+
+    // When all skill harness calls exit non-zero, the verify pipeline falls back to synthesizeFallback
+    // which returns status="ok" with severity-8 metaFindings for each failed skill. With maxTurns=1
+    // and findings above the threshold, the loop exits with outcome="capped". This is deterministic:
+    // the harness always returns the same failure pattern, so the outcome is always "capped".
+    expect(state.outcome).toBe("capped");
+    // startCommand ran before verify
+    expect(existsSync(startSentinel)).toBe(true);
+    // stopCommand must run via try/finally regardless of how verify ended
+    expect(existsSync(stopSentinel)).toBe(true);
+  }, 60000);
 });

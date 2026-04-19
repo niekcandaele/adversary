@@ -10,6 +10,8 @@ You are checking whether the implementation is complete relative to the plan.
 
 {scopeMetadata}
 
+**Scope reminder:** Only report findings for files listed in the branch scope above. Out-of-scope files belong to other work.
+
 **Diff Summary:**
 {diffStat}
 

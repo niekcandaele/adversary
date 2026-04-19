@@ -14,6 +14,7 @@ import {
   getCachedProjectSkills,
   getCachedRepoGuidance,
   runDiscovery,
+  computeToolchainConfigHash,
 } from "../src/discovery/index.js";
 import { writeFileSync } from "node:fs";
 import type { AdversaryConfig, VerifyScope } from "../src/types/index.js";
@@ -246,6 +247,7 @@ describe("runDiscovery", () => {
       testTimeoutMs: 30000,
       prTimeoutMs: 10000,
       summarizerTimeoutMs: 10000,
+      servicesTimeoutMs: 10000,
       browserAutomation: "warn",
       customVerificationSteps: [],
       skillOverrides: {},
@@ -380,5 +382,164 @@ describe("runDiscovery", () => {
     const promptPath = join(turnDir, "verify", "discovery.prompt.md");
     const promptContent = await Bun.file(promptPath).text();
     expect(promptContent).toContain("more files truncated");
+  }, 30000);
+
+  // VI-24: toolchain config hash invalidation
+  test("(VI-24) invalidates discovery cache when toolchain config file changes", async () => {
+    const projectDir = join(tmpDir, "project-vi24");
+    const runDir = join(tmpDir, "run-vi24");
+    const turnDir1 = join(tmpDir, "turn-vi24-1");
+    const turnDir2 = join(tmpDir, "turn-vi24-2");
+    await mkdir(projectDir, { recursive: true });
+    await mkdir(runDir, { recursive: true });
+    await mkdir(turnDir1, { recursive: true });
+    await mkdir(turnDir2, { recursive: true });
+
+    let invocationCount = 0;
+
+    // Write a harness that counts invocations by appending to a counter file
+    const counterFile = join(tmpDir, "invocation-count.txt");
+    const script = join(tmpDir, "counting-harness.sh");
+    writeFileSync(
+      script,
+      `#!/bin/sh
+count=0
+[ -f "${counterFile}" ] && count=$(cat "${counterFile}")
+echo $((count + 1)) > "${counterFile}"
+echo '{"testCommand":"bun test","buildCommand":null,"lintCommands":[],"typeCheckCommands":[],"startCommand":null,"stopCommand":null,"browserDeps":[]}'
+exit 0\n`,
+      { mode: 0o755 }
+    );
+
+    const config = makeConfig(script);
+
+    // Turn 1: first discovery run — harness invoked, cache written
+    const result1 = await runDiscovery({ cwd: projectDir, scope: EMPTY_SCOPE, config, runDir, turnDir: turnDir1 });
+    expect(result1.testCommand).toBe("bun test");
+
+    // Verify hash file was written
+    const hashFile = join(runDir, "discovery.config-hash.txt");
+    expect(await Bun.file(hashFile).exists()).toBe(true);
+    const hash1 = (await Bun.file(hashFile).text()).trim();
+
+    // Simulate turn 2 WITHOUT changing toolchain config — cache should be used
+    const result2 = await runDiscovery({ cwd: projectDir, scope: EMPTY_SCOPE, config, runDir, turnDir: turnDir2 });
+    expect(result2.testCommand).toBe("bun test");
+
+    // Modify package.json to simulate toolchain config change
+    await writeFile(join(projectDir, "package.json"), '{"name":"changed","scripts":{"test":"bun test --new"}}');
+
+    // After the change, hash must differ
+    const hash2 = computeToolchainConfigHash(projectDir);
+    expect(hash2).not.toBe(hash1);
+
+    // Update the hash file to the old value to simulate a stale cache
+    // (discovery.json still contains the old result)
+    const { writeFileSync: wfs } = await import("node:fs");
+    wfs(hashFile, hash1);
+
+    // Turn 3: toolchain changed — discovery should re-run
+    const turnDir3 = join(tmpDir, "turn-vi24-3");
+    await mkdir(turnDir3, { recursive: true });
+    const result3 = await runDiscovery({ cwd: projectDir, scope: EMPTY_SCOPE, config, runDir, turnDir: turnDir3 });
+    expect(result3.testCommand).toBe("bun test"); // harness still returns same value
+
+    // The harness should have been invoked twice: turn 1 (fresh) and turn 3 (invalidated)
+    const finalCount = parseInt((await Bun.file(counterFile).text()).trim(), 10);
+    expect(finalCount).toBe(2); // turn 1 + turn 3 (turn 2 used cache)
+  }, 30000);
+
+  // VI-32: discovery is called only once per turn (no double-discovery)
+  test("(VI-32) discovery harness is called at most once per runDiscovery invocation", async () => {
+    const projectDir = join(tmpDir, "project-vi32");
+    const runDir = join(tmpDir, "run-vi32");
+    const turnDir = join(tmpDir, "turn-vi32");
+    await mkdir(projectDir, { recursive: true });
+    await mkdir(runDir, { recursive: true });
+    await mkdir(turnDir, { recursive: true });
+
+    const counterFile = join(tmpDir, "vi32-count.txt");
+    const script = join(tmpDir, "vi32-harness.sh");
+    writeFileSync(
+      script,
+      `#!/bin/sh
+count=0
+[ -f "${counterFile}" ] && count=$(cat "${counterFile}")
+echo $((count + 1)) > "${counterFile}"
+echo '{"testCommand":null,"buildCommand":null,"lintCommands":[],"typeCheckCommands":[],"startCommand":null,"stopCommand":null,"browserDeps":[]}'
+exit 0\n`,
+      { mode: 0o755 }
+    );
+
+    const config = makeConfig(script);
+
+    await runDiscovery({ cwd: projectDir, scope: EMPTY_SCOPE, config, runDir, turnDir });
+
+    const count = parseInt((await Bun.file(counterFile).text()).trim(), 10);
+    // Discovery harness should have been called exactly once for a single runDiscovery call
+    expect(count).toBe(1);
+  }, 15000);
+
+  // VI-52/VI-56: monorepo — computeToolchainConfigHash walks subdirectories
+  test("(VI-52) invalidates discovery cache when nested monorepo toolchain file changes", async () => {
+    const projectDir = join(tmpDir, "project-vi52");
+    const runDir = join(tmpDir, "run-vi52");
+    const turnDir1 = join(tmpDir, "turn-vi52-1");
+    const turnDir2 = join(tmpDir, "turn-vi52-2");
+    const turnDir3 = join(tmpDir, "turn-vi52-3");
+    await mkdir(projectDir, { recursive: true });
+    await mkdir(runDir, { recursive: true });
+    await mkdir(turnDir1, { recursive: true });
+    await mkdir(turnDir2, { recursive: true });
+    await mkdir(turnDir3, { recursive: true });
+
+    // Create a monorepo structure with a nested package.json
+    const packagesDir = join(projectDir, "packages", "foo");
+    await mkdir(packagesDir, { recursive: true });
+    await writeFile(join(packagesDir, "package.json"), '{"name":"foo","scripts":{"test":"bun test"}}');
+
+    const counterFile = join(tmpDir, "vi52-count.txt");
+    const harness = join(tmpDir, "vi52-harness.sh");
+    writeFileSync(
+      harness,
+      `#!/bin/sh
+count=0
+[ -f "${counterFile}" ] && count=$(cat "${counterFile}")
+echo $((count + 1)) > "${counterFile}"
+echo '{"testCommand":"bun test","buildCommand":null,"lintCommands":[],"typeCheckCommands":[],"startCommand":null,"stopCommand":null,"browserDeps":[]}'
+exit 0\n`,
+      { mode: 0o755 }
+    );
+
+    const config = makeConfig(harness);
+
+    // Turn 1: fresh discovery — harness invoked, cache written
+    const result1 = await runDiscovery({ cwd: projectDir, scope: EMPTY_SCOPE, config, runDir, turnDir: turnDir1 });
+    expect(result1.testCommand).toBe("bun test");
+
+    // Turn 2: cache valid (no changes) — harness NOT invoked
+    const result2 = await runDiscovery({ cwd: projectDir, scope: EMPTY_SCOPE, config, runDir, turnDir: turnDir2 });
+    expect(result2.testCommand).toBe("bun test");
+
+    // Modify the nested package.json — this should invalidate the cache
+    await writeFile(join(packagesDir, "package.json"), '{"name":"foo","scripts":{"test":"bun test --changed"}}');
+
+    // Force hash mismatch by resetting hash file to old value
+    const hashFile = join(runDir, "discovery.config-hash.txt");
+    const oldHash = computeToolchainConfigHash(projectDir);
+    // Wait a tick so mtime changes
+    await new Promise((r) => setTimeout(r, 10));
+    await writeFile(join(packagesDir, "package.json"), '{"name":"foo","scripts":{"test":"bun test --v2"}}');
+
+    // Overwrite hash file with the pre-modification hash to simulate stale cache
+    const { writeFileSync: wfs } = await import("node:fs");
+    wfs(hashFile, oldHash);
+
+    // Turn 3: nested file changed — discovery should re-run
+    await runDiscovery({ cwd: projectDir, scope: EMPTY_SCOPE, config, runDir, turnDir: turnDir3 });
+
+    // Harness invoked twice: turn 1 (fresh) + turn 3 (cache invalidated by nested file change)
+    const finalCount = parseInt((await Bun.file(counterFile).text()).trim(), 10);
+    expect(finalCount).toBe(2);
   }, 30000);
 });

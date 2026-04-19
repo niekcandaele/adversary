@@ -47,7 +47,7 @@ Analyze the changed files to classify what kind of exercise is needed:
 
 ### 2. Start the Environment
 
-Use `startCommand` from the toolchain discovery above. If unavailable, discover from README, package.json, docker-compose.
+**Services have already been started by the harness. Do NOT re-run `startCommand` — it will fail or create duplicate services.** The `startCommand`/`stopCommand` fields in the toolchain discovery JSON are informational only. Proceed directly to exercising the feature.
 
 ### 3. Exercise the Feature
 
@@ -63,7 +63,7 @@ Use the Phase 1 findings above to guide what edge cases to probe. Attempt to tri
 
 ### 6. Cleanup
 
-Stop any services you started.
+**Cleanup is handled by the harness. Do NOT run `stopCommand` or docker compose down.** You do not need to stop services you did not start.
 
 ## Output Format
 

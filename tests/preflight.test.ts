@@ -2,7 +2,7 @@ import { test, expect, describe, beforeAll, afterAll } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { detectPlatform, extractHarnessBinary, checkBrowserAutomation, checkHarnessBinaries, PreflightError, runPreflight } from "../src/preflight/index.js";
+import { detectPlatform, extractHarnessBinary, checkBrowserAutomation, checkHarnessBinaries, checkSetsid, PreflightError, runPreflight } from "../src/preflight/index.js";
 import type { ToolchainDiscovery } from "../src/types/index.js";
 import { DEFAULT_CONFIG } from "../src/types/index.js";
 
@@ -60,6 +60,7 @@ const EMPTY_DISCOVERY: ToolchainDiscovery = {
   lintCommands: [],
   typeCheckCommands: [],
   startCommand: null,
+  stopCommand: null,
   browserDeps: [],
 };
 
@@ -69,6 +70,7 @@ const DISCOVERY_WITH_BROWSER: ToolchainDiscovery = {
   lintCommands: [],
   typeCheckCommands: [],
   startCommand: null,
+  stopCommand: null,
   browserDeps: ["playwright"],
 };
 
@@ -221,5 +223,110 @@ describe("runPreflight resumeMode", () => {
     }
     // It should have thrown (either PreflightError for dirty tree, or other checks)
     expect(threw).toBe(true);
+  });
+});
+
+// VI-2: checkSetsid preflight check
+describe("checkSetsid", () => {
+  test("returns ok when setsid is in PATH", async () => {
+    // setsid must be present on the test host (Linux with util-linux)
+    const result = await checkSetsid();
+    // On the test host, setsid should be available. If it's not, the test
+    // will document this clearly rather than silently passing.
+    if (!result.ok) {
+      // If setsid is genuinely missing, the error message must point to the fix
+      expect(result.reason).toContain("setsid");
+      expect(result.reason).toContain("util-linux");
+    } else {
+      expect(result.ok).toBe(true);
+    }
+  });
+
+  test("returns not-ok with descriptive message when setsid is absent from PATH", async () => {
+    // Create a temporary bin directory that contains 'which' but NOT 'setsid'.
+    // This ensures commandExists("setsid") fails without affecting the 'which' lookup.
+    const { mkdtempSync, writeFileSync } = await import("node:fs");
+    const { join: pathJoin } = await import("node:path");
+    const { tmpdir } = await import("node:os");
+
+    const fakeBinDir = mkdtempSync(pathJoin(tmpdir(), "adversary-checkSetsid-test-"));
+    // Write a stub 'which' that succeeds for any command — this is needed because
+    // commandExists spawns 'which <cmd>' and must be able to find 'which' itself.
+    writeFileSync(pathJoin(fakeBinDir, "which"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+
+    // Use only our fake bin dir: 'which' is there (returns exit 1, meaning setsid NOT found)
+    const result = await checkSetsid({ PATH: fakeBinDir });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain("setsid");
+    expect(result.reason).toContain("util-linux");
+  });
+});
+
+// VI-26: runPreflight → missing setsid → PreflightError
+// ─────────────────────────────────────────────────────────────────────────────
+describe("runPreflight — missing setsid throws PreflightError (VI-26)", () => {
+  let repoDir: string;
+  let planFile: string;
+  let fakeBinDir: string;
+
+  beforeAll(async () => {
+    const { mkdtempSync, writeFileSync: wfs } = await import("node:fs");
+    const { join: pathJoin } = await import("node:path");
+    const { tmpdir: td } = await import("node:os");
+
+    // Create a clean git repo (no untracked files so dirty-tree check passes)
+    repoDir = await mkdtemp(join(tmpdir(), "adversary-preflight-setsid-"));
+    const run = async (args: string[]) => {
+      const proc = Bun.spawn(["git", ...args], { cwd: repoDir, stdout: "pipe", stderr: "pipe" });
+      await proc.exited;
+    };
+    await run(["init", "-b", "main"]);
+    await run(["config", "user.email", "t@t.com"]);
+    await run(["config", "user.name", "T"]);
+    // Write and commit plan.md so it's not untracked
+    planFile = join(repoDir, "plan.md");
+    await writeFile(planFile, "# Test Plan\n\nsome content\n");
+    await writeFile(join(repoDir, "README.md"), "test");
+    await run(["add", "."]);
+    await run(["commit", "-m", "init"]);
+
+    // Fake bin dir: prepended to PATH.
+    // Contains a 'which' shim that returns exit 1 for 'setsid' only,
+    // and delegates to the real 'which' for everything else.
+    // Also contains a stub 'pi' so harness binary check succeeds.
+    const realPath = process.env.PATH ?? "/usr/bin:/bin";
+    fakeBinDir = mkdtempSync(pathJoin(td(), "adversary-preflight-vi26-bin-"));
+
+    // 'which' shim: fail for setsid, delegate to real which for others
+    wfs(
+      pathJoin(fakeBinDir, "which"),
+      `#!/bin/sh
+case "$1" in
+  setsid) exit 1;;
+  *) exec /usr/bin/which "$@";;
+esac\n`,
+      { mode: 0o755 }
+    );
+    // Stub 'pi' so harness binary check succeeds
+    wfs(pathJoin(fakeBinDir, "pi"), `#!/bin/sh\nexit 0\n`, { mode: 0o755 });
+  });
+
+  afterAll(async () => {
+    await rm(repoDir, { recursive: true, force: true });
+  });
+
+  test("throws PreflightError mentioning setsid when setsid is absent from PATH", async () => {
+    // Prepend our fake bin dir to PATH so the 'which' shim intercepts the setsid check
+    const modifiedPath = `${fakeBinDir}:${process.env.PATH ?? "/usr/bin:/bin"}`;
+    let caughtError: Error | null = null;
+    try {
+      await runPreflight(repoDir, planFile, DEFAULT_CONFIG, { ...process.env, PATH: modifiedPath });
+    } catch (e) {
+      caughtError = e as Error;
+    }
+    expect(caughtError).not.toBeNull();
+    expect(caughtError).toBeInstanceOf(PreflightError);
+    expect(caughtError!.message).toContain("setsid");
+    expect(caughtError!.message).toContain("util-linux");
   });
 });

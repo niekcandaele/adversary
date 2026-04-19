@@ -3,6 +3,11 @@ import type { SkillResult, VerifyReport, VerifyFinding } from "../types/index.js
 /**
  * Deterministic fallback synthesis when the LLM synthesis step fails.
  * Concatenates all findings, deduplicates by (path, line) taking highest severity.
+ *
+ * Scope filtering is NOT applied here — it is applied upstream in verify/index.ts
+ * after each skill result and again to the final synthesized report. Applying it
+ * a third time here would be redundant and could accidentally drop deterministic
+ * findings that are intentionally unscoped.
  */
 export function synthesizeFallback(results: SkillResult[]): VerifyReport {
   const status = "ok" as const;

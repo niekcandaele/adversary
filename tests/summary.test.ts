@@ -230,6 +230,43 @@ describe("assemblePrBody", () => {
     expect(body).toContain("severity 2");
   });
 
+  // VI-15: assemblePrBody with isFailure=true
+  test("(VI-15) isFailure=true: banner appears early in body before the adversary warning line", () => {
+    const tmpDir = "/tmp/test-run";
+    const state = makeState(tmpDir, { outcome: "verify-failure" });
+    const body = assemblePrBody(state, 7, makeLlmOutput(), tmpDir, true);
+
+    // Banner must be present
+    expect(body).toContain("Adversary stopped early");
+    // The outcome label (not the raw key) must appear in the banner
+    // "verify-failure" → outcomeLabel → human-readable string containing "verif" and "fail"
+    expect(body).toMatch(/verif.*(failure|failed)/i);
+    // Banner must appear before the adversary warning line (i.e., it's near the top)
+    const bannerIndex = body.indexOf("Adversary stopped early");
+    const warningIndex = body.indexOf("automatically by the adversary orchestrator");
+    expect(bannerIndex).toBeGreaterThanOrEqual(0);
+    expect(bannerIndex).toBeLessThan(warningIndex);
+  });
+
+  test("(VI-15) isFailure=false (default): no banner in body", () => {
+    const tmpDir = "/tmp/test-run";
+    const state = makeState(tmpDir, { outcome: "clean" });
+    const body = assemblePrBody(state, 7, makeLlmOutput(), tmpDir, false);
+    expect(body).not.toContain("Adversary stopped early");
+  });
+
+  test("(VI-15) isFailure=true: outcome label uses human-readable form not raw key", () => {
+    const tmpDir = "/tmp/test-run";
+    // capped outcome → should produce human-readable label not "capped"
+    const state = makeState(tmpDir, { outcome: "capped" });
+    const body = assemblePrBody(state, 7, makeLlmOutput(), tmpDir, true);
+    // The raw outcome key "capped" should not appear as the banner text
+    // The outcomeLabel should be something like "Max turns reached" or similar
+    expect(body).toMatch(/adversary stopped early/i);
+    // The label in the banner should not just be the raw "capped" key
+    expect(body).not.toMatch(/stopped early.*\*\*capped\*\*/i);
+  });
+
   test("works without explicit cwd param (uses process.cwd() default)", () => {
     const state = makeState("/tmp/test-run", { outcome: "clean" });
     // Call assemblePrBody without the optional cwd argument

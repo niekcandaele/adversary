@@ -84,9 +84,10 @@ Config file fields:
     "summarizerCommandTemplate": "pi -p @{promptFile}",
     "implementTimeoutMs": 10800000,
     "verifyTimeoutMs": 900000,
-    "testTimeoutMs": 1800000,
+    "testTimeoutMs": 3600000,
     "prTimeoutMs": 300000,
     "summarizerTimeoutMs": 300000,
+    "servicesTimeoutMs": 300000,
     "browserAutomation": "warn",
     "customVerificationSteps": [],
     "skillOverrides": {}
@@ -130,9 +131,10 @@ Template variables:
 Timeouts (set via config file — defaults):
   implementTimeoutMs:  10800000 (3 hours)
   verifyTimeoutMs:     900000  (15 minutes, per-skill)
-  testTimeoutMs:       1800000 (30 minutes, for deterministic test command)
+  testTimeoutMs:       3600000 (60 minutes, for deterministic test command)
   prTimeoutMs:         300000  (5 minutes)
   summarizerTimeoutMs: 300000  (5 minutes)
+  servicesTimeoutMs:   300000  (5 minutes, for startCommand/stopCommand)
 
 Examples:
   adversary run --plan /path/to/plan.md --turns 6 --severity-threshold 7

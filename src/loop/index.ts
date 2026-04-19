@@ -186,6 +186,17 @@ export async function runLoop(options: {
     const implementCommand = interpolate(config.implementCommandTemplate, vars);
     await writeText(join(turnDir, "implement-command.txt"), implementCommand);
 
+    // NOTE: Discovery (runDiscovery) and startCommand are deliberately deferred
+    // until AFTER implement+commit (step 4b below). This avoids two problems:
+    //   (a) VI-38/VI-45: capturing discovery before implement would see a stale
+    //       toolchain — if implement adds a startCommand or changes testCommand,
+    //       the pre-implement discovery misses it on the same turn.
+    //   (b) VI-40: running startCommand before the skipVerify check means
+    //       services start (and stop) even on resume turns where nothing runs,
+    //       causing spurious failures when start is non-idempotent.
+    // Discovery now runs after the commit step and before verify.
+    // startCommand is only invoked when !skipVerify.
+
     // Variables to track implement phase result
     let implDurationMs = 0;
     let resumedCommitSha: string | undefined = options.resumePoint?.knownCommitSha;
@@ -221,6 +232,7 @@ export async function runLoop(options: {
         };
         state.turns.push(turnResult);
         await writeTurnSummary(turnDir, turnResult);
+        // Discovery + startCommand have not run yet at this point — no services to stop.
         state.outcome = "implement-failure";
         return state;
       }
@@ -269,6 +281,7 @@ export async function runLoop(options: {
           };
           state.turns.push(turnResult);
           await writeTurnSummary(turnDir, turnResult);
+          // Discovery + startCommand have not run yet at this point — no services to stop.
           state.outcome = "summarizer-failure";
           return state;
         }
@@ -295,6 +308,7 @@ export async function runLoop(options: {
             };
             state.turns.push(turnResult);
             await writeTurnSummary(turnDir, turnResult);
+            // Discovery + startCommand have not run yet at this point — no services to stop.
             continue;
           }
           throw e;
@@ -309,41 +323,172 @@ export async function runLoop(options: {
       }
     }
 
+    // 4b. Post-commit discovery + startCommand.
+    // Discovery runs here (after implement+commit) so it sees the post-implement
+    // toolchain — e.g. a startCommand added by this turn's implement step.
+    // On turn 1 this also means the diff is non-empty (branch has diverged from base).
+    // startCommand is only invoked when !skipVerify to avoid spurious failures on
+    // resume turns where services start/stop around a no-op verify path.
+    //
+    // Optimisation (VI-54): when skipVerify=true and a cached verify.json exists,
+    // use the stale cached discovery (via the runDir cache) without re-invoking the
+    // harness — we will use the cached report and never reach startCommand anyway.
+    // This avoids a spurious harness invocation on resume turns that don't need it.
+    let cachedReportForSkip: VerifyReport | null = null;
+    if (skipVerify) {
+      try {
+        cachedReportForSkip = await readJsonFile<VerifyReport>(join(turnDir, "verify.json"));
+      } catch {
+        // Cache unreadable — fall through to normal discovery flow
+      }
+    }
+
+    const postCommitScope = await detectScope(cwd, state.baseBranch);
+    // When skipVerify=true and we already have a cached verify report, skip discovery
+    // entirely to avoid a spurious harness invocation. Services won't be started on
+    // skipVerify turns anyway so the discovery result is irrelevant.
+    // In all other cases (including skipVerify but unreadable cache), discovery runs
+    // normally (possibly hitting the runDir cache, which is cheap).
+    const discovery = (skipVerify && cachedReportForSkip !== null)
+      ? {
+          testCommand: null as string | null,
+          buildCommand: null as string | null,
+          lintCommands: [] as string[],
+          typeCheckCommands: [] as string[],
+          startCommand: null as string | null,
+          stopCommand: null as string | null,
+          browserDeps: [] as string[],
+        }
+      : await runDiscovery({
+          cwd,
+          scope: postCommitScope,
+          config,
+          runDir: state.runDir,
+          turnDir,
+          env: options.env,
+        });
+
+    // Track whether startCommand was actually invoked so we only call stopCommand
+    // in the finally block when services were actually started.
+    let servicesStarted = false;
+
+    // CONTRACT: The loop owns service lifecycle. The exerciser must NOT re-start services.
+    // startCommand is invoked here (before verify); stopCommand runs in the finally path.
+    // The exerciser prompt and its discovery JSON both enforce this contract.
+    if (!skipVerify && discovery.startCommand) {
+      process.stdout.write(`\n  [services-start] Running: ${discovery.startCommand}\n`);
+      const startResult = await runStep({
+        command: discovery.startCommand,
+        rawArgv: ["sh", "-c", discovery.startCommand],
+        cwd,
+        stdoutPath: join(turnDir, "services-start.stdout.log"),
+        stderrPath: join(turnDir, "services-start.stderr.log"),
+        timeoutMs: config.servicesTimeoutMs,
+        label: "services-start",
+        env: options.env,
+      });
+      if (!startResult.success) {
+        // startCommand failed → no services running → servicesStarted remains false.
+        // We still call stopCommand as best-effort cleanup (in case partial start happened).
+        process.stderr.write(`  [services-start] startCommand failed with exit code ${startResult.exitCode} — skipping verify\n`);
+        const turnResult: TurnResult = {
+          turn,
+          implementCommand,
+          verifyCommand: "",
+          implementDurationMs: implDurationMs,
+          verifyDurationMs: 0,
+          repoChanged,
+          commitSha,
+          verifyStatus: "skipped",
+          thresholdFindings: [],
+          belowThresholdFindings: [],
+          outcome: "services-start-failure",
+        };
+        state.turns.push(turnResult);
+        await writeTurnSummary(turnDir, turnResult);
+        await runStopCommand(discovery.stopCommand, cwd, turnDir, config, options.env);
+        state.outcome = "services-start-failure";
+        return state;
+      }
+      servicesStarted = true;
+    }
+
     // 5. Scope detection (deterministic)
     const verifyCommand = "multi-skill: 4 parallel + deterministic commands + exerciser + synthesis";
     await writeText(join(turnDir, "verify-command.txt"), verifyCommand);
 
     process.stdout.write("\n");
 
-    let report: VerifyReport;
-    const verifyStart = Date.now();
+    // try/finally ensures stopCommand always runs after services were started,
+    // even if writeTurnSummary or any other post-verify code throws.
+    try {
+      let report: VerifyReport;
+      const verifyStart = Date.now();
 
-    if (skipVerify) {
-      process.stdout.write(`  [Resume] Skipping verify — verify.json already exists for this turn\n`);
-      // Read the cached verify.json result; if unreadable, fall through to re-run
-      let cachedReport: VerifyReport | null = null;
-      try {
-        cachedReport = await readJsonFile<VerifyReport>(join(turnDir, "verify.json"));
-      } catch (e) {
-        process.stdout.write(`  [Resume] verify.json not readable (${String(e)}), re-running verify\n`);
-      }
-      if (cachedReport) {
-        report = cachedReport;
+      if (skipVerify) {
+        process.stdout.write(`  [Resume] Skipping verify — verify.json already exists for this turn\n`);
+        // cachedReportForSkip was read above (before discovery) to avoid unnecessary
+        // harness invocation. Use it here; if it was null (unreadable), fall through to re-run.
+        if (cachedReportForSkip) {
+          report = cachedReportForSkip;
+        } else {
+          // Fall through to run verify normally
+          try {
+            const scope = await detectScope(cwd, state.baseBranch);
+            if (turn === 1) await checkBrowserAutomation(config.browserAutomation, discovery);
+            const guidance = await getCachedRepoGuidance(state.runDir);
+            report = await runVerification({ cwd, turnDir, scope, discovery, planContent, config, repoGuidance: guidance, env: options.env });
+          } catch (e) {
+            process.stderr.write(`  Error: verification pipeline failed: ${e}\n`);
+            const turnResult: TurnResult = {
+              turn, implementCommand, verifyCommand,
+              implementDurationMs: implDurationMs, verifyDurationMs: Date.now() - verifyStart,
+              repoChanged, commitSha, verifyStatus: "error",
+              thresholdFindings: [], belowThresholdFindings: [], outcome: "verify-failure",
+            };
+            state.turns.push(turnResult);
+            await writeTurnSummary(turnDir, turnResult);
+            state.outcome = "verify-failure";
+            return state;
+          }
+        }
       } else {
-        // Fall through to run verify normally
         try {
+          // 5a. Detect scope (post-commit; discovery already ran above)
           const scope = await detectScope(cwd, state.baseBranch);
-          const discovery = await runDiscovery({ cwd, scope, config, runDir: state.runDir, turnDir, env: options.env });
-          if (turn === 1) await checkBrowserAutomation(config.browserAutomation, discovery);
-          const guidance = await getCachedRepoGuidance(state.runDir);
-          report = await runVerification({ cwd, turnDir, scope, discovery, planContent, config, repoGuidance: guidance, env: options.env });
+
+          // 5b. Browser automation check (turn 1 only)
+          if (turn === 1) {
+            await checkBrowserAutomation(config.browserAutomation, discovery);
+          }
+
+          // 5c. Read cached repo guidance
+          const repoGuidance = await getCachedRepoGuidance(state.runDir);
+          // 5d. Run verification pipeline
+          report = await runVerification({
+            cwd,
+            turnDir,
+            scope,
+            discovery,
+            planContent,
+            config,
+            repoGuidance,
+            env: options.env,
+          });
         } catch (e) {
           process.stderr.write(`  Error: verification pipeline failed: ${e}\n`);
           const turnResult: TurnResult = {
-            turn, implementCommand, verifyCommand,
-            implementDurationMs: implDurationMs, verifyDurationMs: Date.now() - verifyStart,
-            repoChanged, commitSha, verifyStatus: "error",
-            thresholdFindings: [], belowThresholdFindings: [], outcome: "verify-failure",
+            turn,
+            implementCommand,
+            verifyCommand,
+            implementDurationMs: implDurationMs,
+            verifyDurationMs: Date.now() - verifyStart,
+            repoChanged,
+            commitSha,
+            verifyStatus: "error",
+            thresholdFindings: [],
+            belowThresholdFindings: [],
+            outcome: "verify-failure",
           };
           state.turns.push(turnResult);
           await writeTurnSummary(turnDir, turnResult);
@@ -351,67 +496,52 @@ export async function runLoop(options: {
           return state;
         }
       }
-    } else {
-      try {
-        // 5a. Detect scope
-        const scope = await detectScope(cwd, state.baseBranch);
 
-        // 5b. Discovery (cached after turn 1)
-        const discovery = await runDiscovery({
-          cwd,
-          scope,
-          config,
-          runDir: state.runDir,
-          turnDir,
-          env: options.env,
-        });
+      const verifyDurationMs = Date.now() - verifyStart;
 
-        // 5c. Browser automation check (turn 1 only)
-        if (turn === 1) {
-          await checkBrowserAutomation(config.browserAutomation, discovery);
-        }
-
-        // 5d. Read cached repo guidance
-        const repoGuidance = await getCachedRepoGuidance(state.runDir);
-        // 5e. Run verification pipeline
-        report = await runVerification({
-          cwd,
-          turnDir,
-          scope,
-          discovery,
-          planContent,
-          config,
-          repoGuidance,
-          env: options.env,
-        });
-      } catch (e) {
-        process.stderr.write(`  Error: verification pipeline failed: ${e}\n`);
+      // 6. Handle error status
+      if (report.status === "error") {
+        process.stderr.write(`\n[Turn ${turn}] Verify returned status=error. Stopping.\n`);
+        const { thresholdFindings, belowThresholdFindings } = filterFindings(report.findings, threshold);
         const turnResult: TurnResult = {
           turn,
           implementCommand,
           verifyCommand,
           implementDurationMs: implDurationMs,
-          verifyDurationMs: Date.now() - verifyStart,
+          verifyDurationMs,
           repoChanged,
           commitSha,
           verifyStatus: "error",
-          thresholdFindings: [],
-          belowThresholdFindings: [],
-          outcome: "verify-failure",
+          thresholdFindings,
+          belowThresholdFindings,
+          outcome: "verify-error",
         };
         state.turns.push(turnResult);
         await writeTurnSummary(turnDir, turnResult);
-        state.outcome = "verify-failure";
+        state.outcome = "verify-error";
         return state;
       }
-    }
 
-    const verifyDurationMs = Date.now() - verifyStart;
-
-    // 6. Handle error status
-    if (report.status === "error") {
-      process.stderr.write(`\n[Turn ${turn}] Verify returned status=error. Stopping.\n`);
+      // 8. Split findings by threshold
       const { thresholdFindings, belowThresholdFindings } = filterFindings(report.findings, threshold);
+
+      // 9. Display findings
+      if (thresholdFindings.length > 0) {
+        process.stdout.write("\n" + formatFindingsTable(thresholdFindings) + "\n");
+      } else {
+        process.stdout.write(`\n  ✓ No findings at or above severity threshold ${threshold}\n`);
+      }
+
+      // 10. Determine outcome
+      let outcome: TurnResult["outcome"];
+      if (thresholdFindings.length === 0) {
+        outcome = "clean";
+      } else if (turn >= maxTurns) {
+        outcome = "capped";
+      } else {
+        outcome = "continue";
+      }
+
       const turnResult: TurnResult = {
         turn,
         implementCommand,
@@ -420,69 +550,35 @@ export async function runLoop(options: {
         verifyDurationMs,
         repoChanged,
         commitSha,
-        verifyStatus: "error",
+        commitMessage,
+        turnSummary,
+        verifyStatus: report.status,
         thresholdFindings,
         belowThresholdFindings,
-        outcome: "verify-error",
+        outcome,
       };
       state.turns.push(turnResult);
       await writeTurnSummary(turnDir, turnResult);
-      state.outcome = "verify-error";
-      return state;
-    }
 
-    // 8. Split findings by threshold
-    const { thresholdFindings, belowThresholdFindings } = filterFindings(report.findings, threshold);
+      if (outcome === "clean") {
+        state.outcome = "clean";
+        return state;
+      }
 
-    // 9. Display findings
-    if (thresholdFindings.length > 0) {
-      process.stdout.write("\n" + formatFindingsTable(thresholdFindings) + "\n");
-    } else {
-      process.stdout.write(`\n  ✓ No findings at or above severity threshold ${threshold}\n`);
-    }
+      if (outcome === "capped") {
+        const totalFindings = thresholdFindings.length + belowThresholdFindings.length;
+        process.stdout.write(`\n  ${totalFindings} findings, ${thresholdFindings.length} at/above threshold — max turns reached\n`);
+        state.outcome = "capped";
+        return state;
+      }
 
-    // 10. Determine outcome
-    let outcome: TurnResult["outcome"];
-    if (thresholdFindings.length === 0) {
-      outcome = "clean";
-    } else if (turn >= maxTurns) {
-      outcome = "capped";
-    } else {
-      outcome = "continue";
-    }
-
-    const turnResult: TurnResult = {
-      turn,
-      implementCommand,
-      verifyCommand,
-      implementDurationMs: implDurationMs,
-      verifyDurationMs,
-      repoChanged,
-      commitSha,
-      commitMessage,
-      turnSummary,
-      verifyStatus: report.status,
-      thresholdFindings,
-      belowThresholdFindings,
-      outcome,
-    };
-    state.turns.push(turnResult);
-    await writeTurnSummary(turnDir, turnResult);
-
-    if (outcome === "clean") {
-      state.outcome = "clean";
-      return state;
-    }
-
-    if (outcome === "capped") {
       const totalFindings = thresholdFindings.length + belowThresholdFindings.length;
-      process.stdout.write(`\n  ${totalFindings} findings, ${thresholdFindings.length} at/above threshold — max turns reached\n`);
-      state.outcome = "capped";
-      return state;
+      process.stdout.write(`\n  ${totalFindings} findings, ${thresholdFindings.length} at/above threshold — continuing to turn ${turn + 1}\n`);
+    } finally {
+      // Guarantee stopCommand runs whenever services were started, regardless of
+      // whether writeTurnSummary or any other code in the try block threw.
+      if (servicesStarted) await runStopCommand(discovery.stopCommand, cwd, turnDir, config, options.env);
     }
-
-    const totalFindings = thresholdFindings.length + belowThresholdFindings.length;
-    process.stdout.write(`\n  ${totalFindings} findings, ${thresholdFindings.length} at/above threshold — continuing to turn ${turn + 1}\n`);
   }
 
   // Loop exhausted — check if last turn was a commit failure
@@ -493,4 +589,36 @@ export async function runLoop(options: {
 
 async function writeTurnSummary(turnDir: string, result: TurnResult): Promise<void> {
   await writeJsonFile(join(turnDir, "turn-summary.json"), result);
+}
+
+/**
+ * Run the stopCommand if set. Failures are logged as warnings but do not
+ * change the turn outcome — teardown is best-effort.
+ */
+async function runStopCommand(
+  stopCommand: string | null,
+  cwd: string,
+  turnDir: string,
+  config: AdversaryConfig,
+  env: NodeJS.ProcessEnv | undefined
+): Promise<void> {
+  if (!stopCommand) return;
+  process.stdout.write(`\n  [services-stop] Running: ${stopCommand}\n`);
+  try {
+    const stopResult = await runStep({
+      command: stopCommand,
+      rawArgv: ["sh", "-c", stopCommand],
+      cwd,
+      stdoutPath: join(turnDir, "services-stop.stdout.log"),
+      stderrPath: join(turnDir, "services-stop.stderr.log"),
+      timeoutMs: config.servicesTimeoutMs,
+      label: "services-stop",
+      env,
+    });
+    if (!stopResult.success) {
+      process.stderr.write(`  [services-stop] Warning: stopCommand exited with code ${stopResult.exitCode} — teardown may be incomplete\n`);
+    }
+  } catch (e) {
+    process.stderr.write(`  [services-stop] Warning: stopCommand threw: ${e} — teardown may be incomplete\n`);
+  }
 }
