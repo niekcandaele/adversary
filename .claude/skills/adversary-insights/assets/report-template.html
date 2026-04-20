@@ -1,0 +1,980 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Adversary Insights</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --bg-elev: #161b22;
+    --bg-elev-2: #1c2330;
+    --border: #30363d;
+    --border-soft: #21262d;
+    --fg: #e6edf3;
+    --fg-muted: #8b949e;
+    --fg-dim: #6e7681;
+    --accent: #58a6ff;
+    --accent-soft: #1f6feb33;
+    --good: #3fb950;
+    --good-soft: #2ea04333;
+    --warn: #d29922;
+    --warn-soft: #bb800933;
+    --bad: #f85149;
+    --bad-soft: #da363333;
+    --neutral: #6e7681;
+    --shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    --radius: 8px;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: var(--sans);
+    background: var(--bg);
+    color: var(--fg);
+    line-height: 1.55;
+    font-size: 14px;
+    padding: 32px 24px 80px;
+  }
+  .container { max-width: 1200px; margin: 0 auto; }
+  code, pre { font-family: var(--mono); font-size: 12px; }
+  header.top {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    margin-bottom: 8px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  header.top h1 {
+    margin: 0;
+    font-size: 24px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  header.top .meta { color: var(--fg-muted); font-size: 13px; }
+  .totals-strip {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px;
+    margin: 24px 0 32px;
+  }
+  .totals-strip .stat {
+    background: var(--bg-elev);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius);
+    padding: 12px 16px;
+  }
+  .totals-strip .stat .label {
+    color: var(--fg-muted);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 4px;
+  }
+  .totals-strip .stat .value {
+    font-size: 22px;
+    font-weight: 600;
+    font-family: var(--mono);
+  }
+  section {
+    background: var(--bg-elev);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius);
+    padding: 20px 24px;
+    margin-bottom: 20px;
+  }
+  section > h2 {
+    margin: 0 0 14px;
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  section > h2 .subtitle {
+    color: var(--fg-muted);
+    font-weight: 400;
+    font-size: 13px;
+    margin-left: 8px;
+  }
+  .narrative { color: var(--fg); }
+  .narrative p { margin: 0 0 10px; }
+  .narrative p:last-child { margin-bottom: 0; }
+  .narrative strong { color: var(--fg); font-weight: 600; }
+  .narrative em { color: var(--fg); font-style: italic; }
+  .narrative code {
+    background: var(--bg-elev-2);
+    padding: 1px 6px;
+    border-radius: 4px;
+    color: var(--accent);
+  }
+  .evidence { margin-top: 12px; }
+  .evidence summary {
+    cursor: pointer;
+    color: var(--fg-muted);
+    font-size: 12px;
+    padding: 4px 0;
+    user-select: none;
+    list-style: none;
+  }
+  .evidence summary::-webkit-details-marker { display: none; }
+  .evidence summary::before {
+    content: "▸";
+    display: inline-block;
+    margin-right: 6px;
+    transition: transform 0.15s ease;
+    color: var(--fg-dim);
+  }
+  .evidence[open] summary::before { transform: rotate(90deg); }
+  .evidence summary:hover { color: var(--fg); }
+  .evidence-list { margin: 8px 0 0; padding: 0; list-style: none; }
+  .evidence-item {
+    margin-bottom: 10px;
+    padding: 10px 12px;
+    background: var(--bg-elev-2);
+    border-left: 2px solid var(--accent);
+    border-radius: 0 4px 4px 0;
+  }
+  .evidence-item .quote {
+    color: var(--fg);
+    font-family: var(--mono);
+    font-size: 12px;
+    white-space: pre-wrap;
+    margin-bottom: 6px;
+  }
+  .evidence-item .meta {
+    color: var(--fg-dim);
+    font-size: 11px;
+    font-family: var(--mono);
+  }
+  .evidence-item .meta .repo { color: var(--accent); }
+  .evidence-item .meta .path { color: var(--fg-muted); }
+  table.report-card {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  table.report-card th, table.report-card td {
+    text-align: left;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  table.report-card th {
+    color: var(--fg-muted);
+    font-weight: 500;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    cursor: pointer;
+    user-select: none;
+    position: relative;
+  }
+  table.report-card th:hover { color: var(--fg); }
+  table.report-card th.sorted::after {
+    content: attr(data-arrow);
+    margin-left: 6px;
+    color: var(--accent);
+  }
+  table.report-card td .repo-name { font-family: var(--mono); font-weight: 600; }
+  table.report-card td .one-liner {
+    color: var(--fg-muted);
+    font-size: 12px;
+    margin-top: 2px;
+  }
+  table.report-card td.num { font-family: var(--mono); text-align: right; }
+  .score-pills { display: inline-flex; gap: 2px; }
+  .score-pill {
+    width: 14px;
+    height: 6px;
+    border-radius: 1px;
+    background: var(--border);
+  }
+  .score-pill.filled.good { background: var(--good); }
+  .score-pill.filled.warn { background: var(--warn); }
+  .score-pill.filled.bad { background: var(--bad); }
+  .convergence-pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 500;
+    font-family: var(--mono);
+  }
+  .convergence-pill.good { background: var(--good-soft); color: var(--good); }
+  .convergence-pill.warn { background: var(--warn-soft); color: var(--warn); }
+  .convergence-pill.bad { background: var(--bad-soft); color: var(--bad); }
+  .glance-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 16px;
+  }
+  .glance-card {
+    padding: 14px 16px;
+    background: var(--bg-elev-2);
+    border-radius: 6px;
+    border-top: 2px solid var(--accent);
+  }
+  .glance-card.working { border-top-color: var(--good); }
+  .glance-card.hindering { border-top-color: var(--bad); }
+  .glance-card.quick { border-top-color: var(--warn); }
+  .glance-card.structural { border-top-color: var(--accent); }
+  .glance-card h3 {
+    margin: 0 0 8px;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--fg-muted);
+    font-weight: 600;
+  }
+  .split {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr);
+    gap: 24px;
+  }
+  @media (max-width: 720px) { .split { grid-template-columns: 1fr; } }
+  .stacked-bar {
+    display: flex;
+    width: 100%;
+    height: 28px;
+    border-radius: 4px;
+    overflow: hidden;
+    background: var(--bg-elev-2);
+    margin-bottom: 12px;
+  }
+  .stacked-bar .seg {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    font-size: 11px;
+    font-weight: 600;
+    font-family: var(--mono);
+    overflow: hidden;
+    white-space: nowrap;
+  }
+  .legend { display: flex; flex-wrap: wrap; gap: 12px 18px; font-size: 12px; color: var(--fg-muted); }
+  .legend .swatch {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+    margin-right: 6px;
+    vertical-align: middle;
+  }
+  .friction-cat {
+    margin-top: 18px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border-soft);
+  }
+  .friction-cat h3 {
+    margin: 0 0 8px;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .friction-cat h3 .swatch {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+    margin-right: 6px;
+    vertical-align: middle;
+  }
+  .friction-cat h3 .pct {
+    color: var(--fg-muted);
+    font-weight: 400;
+  }
+  .hbar-list { margin: 0; padding: 0; list-style: none; }
+  .hbar-list li {
+    display: grid;
+    grid-template-columns: 130px 1fr 50px;
+    align-items: center;
+    gap: 10px;
+    padding: 4px 0;
+    font-size: 12px;
+  }
+  .hbar-list .name { font-family: var(--mono); color: var(--fg); }
+  .hbar-list .bar {
+    height: 8px;
+    background: var(--accent-soft);
+    border-radius: 2px;
+    position: relative;
+  }
+  .hbar-list .bar .fill {
+    position: absolute;
+    inset: 0 auto 0 0;
+    background: var(--accent);
+    border-radius: 2px;
+  }
+  .hbar-list .count {
+    text-align: right;
+    color: var(--fg-muted);
+    font-family: var(--mono);
+  }
+  .tweak {
+    background: var(--bg-elev-2);
+    padding: 12px 14px;
+    border-radius: 6px;
+    margin-bottom: 10px;
+    border-left: 3px solid var(--accent);
+  }
+  .tweak.claude_md_addition { border-left-color: var(--good); }
+  .tweak.verify_step_change { border-left-color: var(--warn); }
+  .tweak.config_change { border-left-color: var(--accent); }
+  .tweak.repo_instrumentation { border-left-color: var(--warn); }
+  .tweak.plan_practice { border-left-color: #6f42c1; }
+  .tweak .kind {
+    display: inline-block;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--fg-muted);
+    margin-bottom: 4px;
+    font-family: var(--mono);
+  }
+  .tweak .text { color: var(--fg); margin-bottom: 4px; }
+  .tweak .reason { color: var(--fg-muted); font-size: 12px; }
+  .tweak .occurrences {
+    display: inline-block;
+    margin-left: 8px;
+    padding: 1px 6px;
+    border-radius: 8px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-size: 10px;
+    font-family: var(--mono);
+  }
+  .repo-note {
+    padding: 12px 14px;
+    background: var(--bg-elev-2);
+    border-radius: 6px;
+    margin-bottom: 10px;
+  }
+  .repo-note .repo-name { font-family: var(--mono); font-weight: 600; margin-bottom: 6px; }
+  .repo-note ul.issues {
+    margin: 6px 0 0;
+    padding-left: 20px;
+    color: var(--fg-muted);
+    font-size: 12px;
+  }
+  footer {
+    margin-top: 32px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border-soft);
+    color: var(--fg-dim);
+    font-size: 11px;
+    font-family: var(--mono);
+    text-align: center;
+  }
+  .empty { color: var(--fg-dim); font-style: italic; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <header class="top">
+    <h1>Adversary Insights</h1>
+    <div class="meta" id="meta-line"></div>
+  </header>
+
+  <div class="totals-strip" id="totals-strip"></div>
+
+  <section id="section-glance">
+    <h2>At a Glance</h2>
+    <div class="glance-grid" id="glance-grid"></div>
+  </section>
+
+  <section id="section-report-card">
+    <h2>Per-repo Report Card <span class="subtitle">click any column to sort</span></h2>
+    <table class="report-card" id="report-card">
+      <thead>
+        <tr id="report-card-head"></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section id="section-convergence">
+    <h2>Convergence Patterns</h2>
+    <div class="split">
+      <div id="convergence-charts"></div>
+      <div>
+        <div class="narrative" id="convergence-narrative"></div>
+        <details class="evidence" id="convergence-evidence">
+          <summary>Evidence</summary>
+          <ul class="evidence-list"></ul>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <section id="section-friction">
+    <h2>Friction Attribution <span class="subtitle">where the runs that didn't go clean broke down</span></h2>
+    <div id="friction-content"></div>
+  </section>
+
+  <section id="section-plan-quality">
+    <h2>Plan Quality</h2>
+    <div class="split">
+      <div id="plan-quality-chart"></div>
+      <div>
+        <div class="narrative" id="plan-quality-narrative"></div>
+        <details class="evidence" id="plan-quality-evidence">
+          <summary>Evidence</summary>
+          <ul class="evidence-list"></ul>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <section id="section-repo-instrumentation">
+    <h2>Repo Instrumentation</h2>
+    <div class="narrative" id="repo-instr-narrative"></div>
+    <div id="repo-instr-notes" style="margin-top: 14px;"></div>
+  </section>
+
+  <section id="section-verify-health">
+    <h2>Verify Pipeline Health</h2>
+    <div class="split">
+      <div>
+        <div style="margin-bottom: 12px; color: var(--fg-muted); font-size: 12px;">
+          Synthesis fallback rate: <span id="fallback-rate" style="color: var(--fg); font-family: var(--mono);"></span>
+        </div>
+        <div id="skill-bars"></div>
+      </div>
+      <div>
+        <div class="narrative" id="verify-health-narrative"></div>
+        <details class="evidence" id="verify-health-evidence">
+          <summary>Evidence</summary>
+          <ul class="evidence-list"></ul>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <section id="section-tweaks">
+    <h2>Suggested Tweaks</h2>
+    <div id="tweaks"></div>
+  </section>
+
+  <section id="section-notable" style="display:none;">
+    <h2>Notable Observations</h2>
+    <div id="notable"></div>
+  </section>
+
+  <footer>
+    Adversary Insights · schema v<span id="footer-schema"></span> · generated <span id="footer-generated"></span>
+  </footer>
+</div>
+
+<script>
+  const analysis = __ANALYSIS_DATA__;
+
+  function el(tag, attrs, children) {
+    const node = document.createElement(tag);
+    if (attrs) {
+      for (const k of Object.keys(attrs)) {
+        const v = attrs[k];
+        if (v === null || v === undefined || v === false) continue;
+        if (k === "class") node.className = v;
+        else if (k === "style") node.style.cssText = v;
+        else if (k === "text") node.textContent = String(v);
+        else if (k.indexOf("on") === 0 && typeof v === "function") {
+          node.addEventListener(k.slice(2), v);
+        } else {
+          node.setAttribute(k, String(v));
+        }
+      }
+    }
+    appendChildren(node, children);
+    return node;
+  }
+  function svg(tag, attrs, children) {
+    const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    if (attrs) {
+      for (const k of Object.keys(attrs)) {
+        const v = attrs[k];
+        if (v === null || v === undefined || v === false) continue;
+        if (k === "text") node.textContent = String(v);
+        else node.setAttribute(k, String(v));
+      }
+    }
+    appendChildren(node, children);
+    return node;
+  }
+  function appendChildren(node, children) {
+    if (children === null || children === undefined) return;
+    const list = Array.isArray(children) ? children : [children];
+    for (const c of list) {
+      if (c === null || c === undefined || c === false) continue;
+      if (typeof c === "string" || typeof c === "number") {
+        node.appendChild(document.createTextNode(String(c)));
+      } else {
+        node.appendChild(c);
+      }
+    }
+  }
+  function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+
+  function renderMarkdown(md) {
+    const frag = document.createDocumentFragment();
+    if (!md) return frag;
+    const paragraphs = String(md).split(/\n\n+/);
+    for (const para of paragraphs) {
+      const p = document.createElement("p");
+      appendInlineMarkdown(p, para);
+      frag.appendChild(p);
+    }
+    return frag;
+  }
+  function appendInlineMarkdown(parent, text) {
+    const collapsed = text.replace(/\n/g, " ");
+    const re = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*\s][^*]*\*)/g;
+    const matches = Array.from(collapsed.matchAll(re));
+    let lastIdx = 0;
+    for (const m of matches) {
+      if (m.index > lastIdx) {
+        parent.appendChild(document.createTextNode(collapsed.slice(lastIdx, m.index)));
+      }
+      const tok = m[0];
+      let inner;
+      let tag;
+      if (tok.charAt(0) === "`") { tag = "code"; inner = tok.slice(1, -1); }
+      else if (tok.indexOf("**") === 0) { tag = "strong"; inner = tok.slice(2, -2); }
+      else { tag = "em"; inner = tok.slice(1, -1); }
+      const node = document.createElement(tag);
+      node.textContent = inner;
+      parent.appendChild(node);
+      lastIdx = m.index + tok.length;
+    }
+    if (lastIdx < collapsed.length) {
+      parent.appendChild(document.createTextNode(collapsed.slice(lastIdx)));
+    }
+  }
+
+  function fmtPct(n) { return (n * 100).toFixed(0) + "%"; }
+  function fmtRelDate(iso) {
+    if (!iso) return "—";
+    const d = new Date(iso);
+    const now = new Date();
+    const diffDays = Math.floor((now - d) / 86400000);
+    if (diffDays === 0) return "today";
+    if (diffDays === 1) return "yesterday";
+    if (diffDays < 7) return diffDays + "d ago";
+    if (diffDays < 30) return Math.floor(diffDays / 7) + "w ago";
+    return d.toISOString().slice(0, 10);
+  }
+  function scoreClass(score, max) {
+    const ratio = score / max;
+    if (ratio >= 0.8) return "good";
+    if (ratio >= 0.5) return "warn";
+    return "bad";
+  }
+  function convergenceClass(rate) {
+    if (rate >= 0.85) return "good";
+    if (rate >= 0.6) return "warn";
+    return "bad";
+  }
+
+  function evidenceItem(ev) {
+    return el("li", { class: "evidence-item" }, [
+      el("div", { class: "quote", text: ev.quote }),
+      el("div", { class: "meta" }, [
+        el("span", { class: "repo", text: ev.repo }),
+        " · ",
+        el("span", { text: "run " + ev.run_id }),
+        " · ",
+        el("span", { class: "path", text: ev.artifact_path })
+      ])
+    ]);
+  }
+  function renderEvidenceInto(detailsEl, evidenceArr) {
+    if (!evidenceArr || !evidenceArr.length) {
+      detailsEl.style.display = "none";
+      return;
+    }
+    const list = detailsEl.querySelector(".evidence-list");
+    clear(list);
+    for (const ev of evidenceArr) list.appendChild(evidenceItem(ev));
+  }
+  function inlineEvidenceDetails(evidenceArr) {
+    const det = el("details", { class: "evidence" }, [
+      el("summary", { text: "Evidence (" + evidenceArr.length + ")" }),
+      el("ul", { class: "evidence-list" })
+    ]);
+    const list = det.querySelector(".evidence-list");
+    for (const ev of evidenceArr) list.appendChild(evidenceItem(ev));
+    return det;
+  }
+
+  // Header + totals
+  document.getElementById("meta-line").textContent =
+    analysis.window.label + " · " + analysis.totals.runs + " runs · " + analysis.totals.repos + " repos";
+
+  const totalsStrip = document.getElementById("totals-strip");
+  const failureSum = Object.keys(analysis.totals.by_outcome)
+    .filter(k => k !== "clean" && k !== "capped")
+    .reduce((a, k) => a + (analysis.totals.by_outcome[k] || 0), 0);
+  const totalStats = [
+    { label: "Runs", value: analysis.totals.runs },
+    { label: "Repos", value: analysis.totals.repos },
+    { label: "Clean", value: analysis.totals.by_outcome.clean },
+    { label: "Capped", value: analysis.totals.by_outcome.capped },
+    { label: "Failures", value: failureSum },
+    { label: "Total Turns", value: analysis.totals.total_turns },
+    { label: "Implement Hours", value: analysis.totals.total_implement_hours.toFixed(1) },
+    { label: "Verify Hours", value: analysis.totals.total_verify_hours.toFixed(1) }
+  ];
+  for (const stat of totalStats) {
+    totalsStrip.appendChild(el("div", { class: "stat" }, [
+      el("div", { class: "label", text: stat.label }),
+      el("div", { class: "value", text: String(stat.value) })
+    ]));
+  }
+
+  // At a Glance
+  const glanceGrid = document.getElementById("glance-grid");
+  const glanceItems = [
+    { label: "What's working", cls: "working", md: analysis.at_a_glance.working_md },
+    { label: "What's hindering", cls: "hindering", md: analysis.at_a_glance.hindering_md },
+    { label: "Quick wins", cls: "quick", md: analysis.at_a_glance.quick_wins_md },
+    { label: "Structural changes", cls: "structural", md: analysis.at_a_glance.structural_md }
+  ];
+  for (const it of glanceItems) {
+    const narr = el("div", { class: "narrative" });
+    narr.appendChild(renderMarkdown(it.md));
+    glanceGrid.appendChild(el("div", { class: "glance-card " + it.cls }, [
+      el("h3", { text: it.label }),
+      narr
+    ]));
+  }
+
+  // Per-repo Report Card (sortable)
+  const reportCardHead = document.getElementById("report-card-head");
+  const reportCardBody = document.querySelector("#report-card tbody");
+  const headers = [
+    { key: "repo_display_name", label: "Repo", numeric: false },
+    { key: "runs", label: "Runs", numeric: true },
+    { key: "convergence_rate", label: "Convergence", numeric: true },
+    { key: "instrumentation_score", label: "Instrumentation", numeric: true },
+    { key: "verify_health_score", label: "Verify Health", numeric: true },
+    { key: "last_run_at", label: "Last Run", numeric: true }
+  ];
+  let cardRows = analysis.per_repo_report_card.slice();
+  let cardSort = { key: "runs", dir: "desc" };
+
+  function buildHeaders() {
+    clear(reportCardHead);
+    for (const h of headers) {
+      const th = el("th", {
+        class: (h.numeric ? "num " : "") + (cardSort.key === h.key ? "sorted" : ""),
+        "data-sort": h.key,
+        "data-arrow": cardSort.dir === "desc" ? "▼" : "▲",
+        text: h.label,
+        onclick: function () {
+          if (cardSort.key === h.key) {
+            cardSort.dir = cardSort.dir === "desc" ? "asc" : "desc";
+          } else {
+            cardSort.key = h.key;
+            cardSort.dir = "desc";
+          }
+          buildHeaders();
+          renderReportCard();
+        }
+      });
+      reportCardHead.appendChild(th);
+    }
+  }
+
+  function renderScorePills(score, max, palette) {
+    const wrap = el("span", { class: "score-pills" });
+    for (let i = 0; i < max; i++) {
+      const filled = i < score;
+      wrap.appendChild(el("span", { class: "score-pill" + (filled ? " filled " + palette : "") }));
+    }
+    return wrap;
+  }
+
+  function renderReportCard() {
+    clear(reportCardBody);
+    cardRows.sort((a, b) => {
+      const av = a[cardSort.key], bv = b[cardSort.key];
+      if (typeof av === "number" && typeof bv === "number") {
+        return cardSort.dir === "desc" ? bv - av : av - bv;
+      }
+      return cardSort.dir === "desc"
+        ? String(bv).localeCompare(String(av))
+        : String(av).localeCompare(String(bv));
+    });
+    for (const r of cardRows) {
+      const convCls = convergenceClass(r.convergence_rate);
+      const instrPalette = scoreClass(r.instrumentation_score, 5);
+      const verifyPalette = scoreClass(r.verify_health_score, 5);
+      const tr = el("tr", null, [
+        el("td", null, [
+          el("div", { class: "repo-name", text: r.repo_display_name }),
+          el("div", { class: "one-liner", text: r.summary_one_line || "" })
+        ]),
+        el("td", { class: "num", text: String(r.runs) }),
+        el("td", { class: "num" }, [
+          el("span", { class: "convergence-pill " + convCls, text: fmtPct(r.convergence_rate) })
+        ]),
+        el("td", { class: "num" }, [renderScorePills(r.instrumentation_score, 5, instrPalette)]),
+        el("td", { class: "num" }, [renderScorePills(r.verify_health_score, 5, verifyPalette)]),
+        el("td", { class: "num", text: fmtRelDate(r.last_run_at) })
+      ]);
+      reportCardBody.appendChild(tr);
+    }
+  }
+  buildHeaders();
+  renderReportCard();
+
+  // Convergence: turn distribution + outcome donut + narrative
+  const convCharts = document.getElementById("convergence-charts");
+  const td = analysis.convergence.turn_distribution || [];
+  const maxCount = Math.max.apply(null, td.map(d => d.count).concat([1]));
+  const tdW = 320, tdH = 120, tdPad = { top: 14, right: 10, bottom: 22, left: 24 };
+  const tdInnerW = tdW - tdPad.left - tdPad.right;
+  const tdInnerH = tdH - tdPad.top - tdPad.bottom;
+  const xStep = td.length > 0 ? tdInnerW / td.length : tdInnerW;
+  const barW = Math.max(8, Math.min(28, xStep - 4));
+  const tdSvg = svg("svg", { width: tdW, height: tdH, role: "img", "aria-label": "Turn count distribution" }, [
+    svg("text", { x: tdPad.left, y: tdPad.top - 2, "font-size": 10, fill: "#8b949e", text: "turn-count distribution" })
+  ]);
+  for (let i = 0; i < td.length; i++) {
+    const d = td[i];
+    const h = (d.count / maxCount) * tdInnerH;
+    const x = tdPad.left + i * xStep + (xStep - barW) / 2;
+    const y = tdPad.top + (tdInnerH - h);
+    const rect = svg("rect", { x: x, y: y, width: barW, height: h, fill: "#58a6ff", rx: 2 });
+    rect.appendChild(svg("title", { text: d.count + " run(s) finished in " + d.turns + " turn(s)" }));
+    tdSvg.appendChild(rect);
+    tdSvg.appendChild(svg("text", {
+      x: x + barW / 2, y: tdH - tdPad.bottom + 12,
+      "font-size": 10, fill: "#6e7681", "text-anchor": "middle",
+      text: String(d.turns)
+    }));
+  }
+  convCharts.appendChild(tdSvg);
+
+  const ocOrder = ["clean", "capped", "implement-failure", "verify-failure", "verify-error", "commit-failure", "summarizer-failure", "push-failure", "services-start-failure"];
+  const ocColors = {
+    "clean": "#3fb950", "capped": "#d29922",
+    "implement-failure": "#f85149", "verify-failure": "#f85149", "verify-error": "#f85149",
+    "commit-failure": "#bd561d", "summarizer-failure": "#bd561d", "push-failure": "#bd561d", "services-start-failure": "#bd561d"
+  };
+  const ocTotal = ocOrder.reduce((a, k) => a + (analysis.convergence.outcome_distribution[k] || 0), 0);
+  const cx = 60, cy = 60, rOuter = 48, rInner = 28;
+  const donut = svg("svg", { width: 320, height: 120, role: "img", "aria-label": "Outcome distribution donut" });
+  let acc = 0;
+  if (ocTotal > 0) {
+    for (const k of ocOrder) {
+      const v = analysis.convergence.outcome_distribution[k] || 0;
+      if (v === 0) continue;
+      const startAng = (acc / ocTotal) * Math.PI * 2 - Math.PI / 2;
+      acc += v;
+      const endAng = (acc / ocTotal) * Math.PI * 2 - Math.PI / 2;
+      const large = (endAng - startAng) > Math.PI ? 1 : 0;
+      const x0 = cx + rOuter * Math.cos(startAng), y0 = cy + rOuter * Math.sin(startAng);
+      const x1 = cx + rOuter * Math.cos(endAng), y1 = cy + rOuter * Math.sin(endAng);
+      const x2 = cx + rInner * Math.cos(endAng), y2 = cy + rInner * Math.sin(endAng);
+      const x3 = cx + rInner * Math.cos(startAng), y3 = cy + rInner * Math.sin(startAng);
+      const d = "M " + x0 + " " + y0 + " A " + rOuter + " " + rOuter + " 0 " + large + " 1 " + x1 + " " + y1 +
+                " L " + x2 + " " + y2 + " A " + rInner + " " + rInner + " 0 " + large + " 0 " + x3 + " " + y3 + " Z";
+      const path = svg("path", { d: d, fill: ocColors[k] });
+      path.appendChild(svg("title", { text: k + ": " + v }));
+      donut.appendChild(path);
+    }
+  }
+  donut.appendChild(svg("text", {
+    x: cx, y: cy + 4, "text-anchor": "middle", "font-size": 14,
+    fill: "#e6edf3", "font-family": "monospace", "font-weight": 600,
+    text: String(ocTotal)
+  }));
+  const legendG = svg("g", { transform: "translate(130, 16)", "font-size": 10, fill: "#8b949e" });
+  let li = 0;
+  for (const k of ocOrder) {
+    const v = analysis.convergence.outcome_distribution[k] || 0;
+    if (v === 0) continue;
+    const row = svg("g", { transform: "translate(0, " + (li * 12) + ")" }, [
+      svg("rect", { width: 8, height: 8, fill: ocColors[k], rx: 1 }),
+      svg("text", { x: 12, y: 8, text: k + " (" + v + ")" })
+    ]);
+    legendG.appendChild(row);
+    li++;
+  }
+  donut.appendChild(legendG);
+  convCharts.appendChild(donut);
+
+  const convNarr = document.getElementById("convergence-narrative");
+  convNarr.appendChild(renderMarkdown(analysis.convergence.narrative_md));
+  renderEvidenceInto(document.getElementById("convergence-evidence"), analysis.convergence.evidence);
+
+  // Friction Attribution
+  const frictionContent = document.getElementById("friction-content");
+  const frictionOrder = ["plan", "repo_instrumentation", "adversary_pipeline", "external", "unclear"];
+  const frictionLabels = {
+    plan: "Plan",
+    repo_instrumentation: "Repo instrumentation",
+    adversary_pipeline: "Adversary pipeline",
+    external: "External tooling",
+    unclear: "Unclear"
+  };
+  const frictionColors = {
+    plan: "#6f42c1",
+    repo_instrumentation: "#d29922",
+    adversary_pipeline: "#f85149",
+    external: "#6e7681",
+    unclear: "#30363d"
+  };
+  const split = analysis.friction_attribution.split;
+  const stackedBar = el("div", { class: "stacked-bar" });
+  for (const k of frictionOrder) {
+    const v = split[k] || 0;
+    if (v <= 0) continue;
+    stackedBar.appendChild(el("div", {
+      class: "seg",
+      style: "width: " + (v * 100).toFixed(1) + "%; background: " + frictionColors[k] + ";",
+      title: frictionLabels[k] + ": " + fmtPct(v),
+      text: (v * 100).toFixed(0) + "%"
+    }));
+  }
+  frictionContent.appendChild(stackedBar);
+
+  const legend = el("div", { class: "legend" });
+  for (const k of frictionOrder) {
+    if ((split[k] || 0) <= 0) continue;
+    legend.appendChild(el("span", null, [
+      el("span", { class: "swatch", style: "background: " + frictionColors[k] }),
+      frictionLabels[k]
+    ]));
+  }
+  frictionContent.appendChild(legend);
+
+  for (const cat of analysis.friction_attribution.categories) {
+    const wrap = el("div", { class: "friction-cat" });
+    const heading = el("h3", null, [
+      el("span", { class: "swatch", style: "background: " + (frictionColors[cat.source] || "#30363d") }),
+      frictionLabels[cat.source] || cat.source,
+      " ",
+      el("span", { class: "pct", text: "— " + fmtPct(split[cat.source] || 0) })
+    ]);
+    wrap.appendChild(heading);
+    const narr = el("div", { class: "narrative" });
+    narr.appendChild(renderMarkdown(cat.narrative_md));
+    wrap.appendChild(narr);
+    if (cat.evidence && cat.evidence.length) {
+      wrap.appendChild(inlineEvidenceDetails(cat.evidence));
+    }
+    frictionContent.appendChild(wrap);
+  }
+
+  // Plan Quality
+  const pq = analysis.plan_quality;
+  const pqOrder = ["vague", "scoped", "over-scoped", "clear"];
+  const pqColors = { "vague": "#f85149", "scoped": "#3fb950", "over-scoped": "#d29922", "clear": "#58a6ff" };
+  const pqMax = Math.max.apply(null, pqOrder.map(k => pq.clarity_distribution[k] || 0).concat([1]));
+  const pqList = el("ul", { class: "hbar-list" });
+  for (const k of pqOrder) {
+    const v = pq.clarity_distribution[k] || 0;
+    const pct = (v / pqMax) * 100;
+    const fill = el("span", { class: "fill", style: "width: " + pct + "%; background: " + pqColors[k] + ";" });
+    const bar = el("span", { class: "bar" }, [fill]);
+    pqList.appendChild(el("li", null, [
+      el("span", { class: "name", style: "color: " + pqColors[k], text: k }),
+      bar,
+      el("span", { class: "count", text: String(v) })
+    ]));
+  }
+  document.getElementById("plan-quality-chart").appendChild(pqList);
+  const pqNarr = document.getElementById("plan-quality-narrative");
+  pqNarr.appendChild(renderMarkdown(pq.narrative_md));
+  renderEvidenceInto(document.getElementById("plan-quality-evidence"), pq.evidence);
+
+  // Repo Instrumentation
+  const riNarr = document.getElementById("repo-instr-narrative");
+  riNarr.appendChild(renderMarkdown(analysis.repo_instrumentation.narrative_md));
+  const notesContainer = document.getElementById("repo-instr-notes");
+  const perRepoNotes = analysis.repo_instrumentation.per_repo_notes || [];
+  for (const note of perRepoNotes) {
+    const issuesUl = el("ul", { class: "issues" });
+    for (const issue of (note.issues || [])) {
+      issuesUl.appendChild(el("li", { text: issue }));
+    }
+    const noteEl = el("div", { class: "repo-note" }, [
+      el("div", { class: "repo-name", text: note.repo_display_name }),
+      issuesUl
+    ]);
+    if (note.evidence && note.evidence.length) {
+      noteEl.appendChild(inlineEvidenceDetails(note.evidence));
+    }
+    notesContainer.appendChild(noteEl);
+  }
+
+  // Verify Pipeline Health
+  const vh = analysis.verify_pipeline_health;
+  document.getElementById("fallback-rate").textContent = fmtPct(vh.synthesis_fallback_rate);
+  const skillBars = document.getElementById("skill-bars");
+  const sfMax = Math.max.apply(null, vh.skill_finding_counts.map(s => s.findings).concat([1]));
+  const sfList = el("ul", { class: "hbar-list" });
+  for (const s of vh.skill_finding_counts) {
+    const pct = (s.findings / sfMax) * 100;
+    const fill = el("span", { class: "fill", style: "width: " + pct + "%;" });
+    const bar = el("span", { class: "bar" }, [fill]);
+    sfList.appendChild(el("li", null, [
+      el("span", { class: "name", text: s.skill }),
+      bar,
+      el("span", { class: "count", text: String(s.findings) })
+    ]));
+  }
+  skillBars.appendChild(sfList);
+  const vhNarr = document.getElementById("verify-health-narrative");
+  vhNarr.appendChild(renderMarkdown(vh.narrative_md));
+  renderEvidenceInto(document.getElementById("verify-health-evidence"), vh.evidence);
+
+  // Suggested Tweaks
+  const tweaksContainer = document.getElementById("tweaks");
+  const tweaks = analysis.suggested_tweaks || [];
+  if (!tweaks.length) {
+    tweaksContainer.appendChild(el("div", { class: "empty", text: "No suggested tweaks for this window." }));
+  } else {
+    for (const t of tweaks) {
+      const kindRow = el("div", { class: "kind", text: String(t.kind).replace(/_/g, " ") });
+      if (t.occurrences) {
+        kindRow.appendChild(document.createTextNode(" "));
+        kindRow.appendChild(el("span", { class: "occurrences", text: "×" + t.occurrences }));
+      }
+      tweaksContainer.appendChild(el("div", { class: "tweak " + t.kind }, [
+        kindRow,
+        el("div", { class: "text", text: t.text }),
+        el("div", { class: "reason", text: t.reason })
+      ]));
+    }
+  }
+
+  // Notable Observations (escape hatch)
+  const notable = analysis.notable_observations || [];
+  if (notable.length) {
+    document.getElementById("section-notable").style.display = "block";
+    const container = document.getElementById("notable");
+    for (const obs of notable) {
+      const narr = el("div", { class: "narrative" });
+      narr.appendChild(renderMarkdown(obs.narrative_md));
+      const noteEl = el("div", { class: "repo-note" }, [
+        el("div", { style: "font-weight: 600; margin-bottom: 6px;", text: obs.title }),
+        narr
+      ]);
+      if (obs.evidence && obs.evidence.length) {
+        const det = inlineEvidenceDetails(obs.evidence);
+        det.style.marginTop = "8px";
+        noteEl.appendChild(det);
+      }
+      container.appendChild(noteEl);
+    }
+  }
+
+  // Footer
+  document.getElementById("footer-schema").textContent = String(analysis.schema_version);
+  document.getElementById("footer-generated").textContent = new Date(analysis.generated_at).toLocaleString();
+</script>
+</body>
+</html>

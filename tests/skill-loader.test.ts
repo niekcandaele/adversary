@@ -51,6 +51,14 @@ describe("loadSkillTemplate", () => {
     expect(template).toContain("{planContent}");
   });
 
+  test.each(["reviewer", "ux-reviewer", "qa", "exerciser"])(
+    "%s template has planContent placeholder",
+    async (skill) => {
+      const template = await loadSkillTemplate(skill);
+      expect(template).toContain("{planContent}");
+    }
+  );
+
   test("synthesis template has stepsJson placeholder", async () => {
     const template = await loadSkillTemplate("synthesis");
     expect(template).toContain("{stepsJson}");
